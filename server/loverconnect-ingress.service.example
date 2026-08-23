@@ -1,0 +1,18 @@
+[Unit]
+Description=LoverConnect event ingress for RikkaHub
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/loverconnect-ingress
+EnvironmentFile=/etc/loverconnect-ingress/credentials.env
+ExecStart=/usr/bin/python3 /opt/loverconnect-ingress/loverconnect_ingress.py
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?><!--
+   Sample data extraction rules file; uncomment and customize as necessary.
+   See https://developer.android.com/about/versions/12/backup-restore#xml-changes
+   for details.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="sharedpref" path="lc_location_secure.xml" />
+        <exclude domain="sharedpref" path="lc_location_runtime.xml" />
+        <exclude domain="database" path="lc_location_events.db" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="sharedpref" path="lc_location_secure.xml" />
+        <exclude domain="sharedpref" path="lc_location_runtime.xml" />
+        <exclude domain="database" path="lc_location_events.db" />
+    </device-transfer>
+</data-extraction-rules>

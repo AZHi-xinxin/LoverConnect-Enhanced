@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">LoverConnect</string>
+    <string name="accessibility_desc">LoverConnect屏幕观察功能，用于定时截屏分析</string>
+</resources>

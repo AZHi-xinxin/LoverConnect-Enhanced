@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?><!--
+   Sample backup rules file; uncomment and customize as necessary.
+   See https://developer.android.com/guide/topics/data/autobackup
+   for details.
+   Note: This file is ignored for devices older than API 31
+   See https://developer.android.com/about/versions/12/backup-restore
+-->
+<full-backup-content>
+    <!-- Android Keystore keys are non-exportable; do not move their ciphertext. -->
+    <exclude domain="sharedpref" path="lc_location_secure.xml" />
+    <exclude domain="sharedpref" path="lc_location_runtime.xml" />
+    <exclude domain="database" path="lc_location_events.db" />
+</full-backup-content>

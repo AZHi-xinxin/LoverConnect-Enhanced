@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Keep a versioned resource ID so OEM icon caches refresh on upgrade. -->
+    <item name="lc_launcher_230" type="mipmap">@mipmap/ic_launcher</item>
+    <item name="lc_launcher_round_230" type="mipmap">@mipmap/ic_launcher_round</item>
+</resources>
