@@ -194,7 +194,9 @@ SHA256SUMS.txt        源码文件校验清单
 
 本仓库基于 [LoverConnect/LoverConnect](https://github.com/LoverConnect/LoverConnect) 的公开代码继续开发。感谢上游项目提供最初的 Android MCP 基础。
 
-当前上游仓库未提供明确的许可证文件，因此本仓库暂不擅自添加 MIT、Apache 或 GPL 等许可证。源码公开不等同于自动授予再分发、商业使用或派生许可；待与上游维护者确认后，再补充正式 `LICENSE`。
+上游维护者已明确同意采用 MIT License。本社区增强版据此以 MIT License 发布，完整条款见 [`LICENSE`](LICENSE)。许可证文件同时保留上游 `LoverConnect` 与增强版维护者 `AZHi-xinxin` 的版权声明。
+
+第三方依赖、字体、图片或其他素材仍分别适用其自身许可证；MIT License 只覆盖本仓库中版权持有人有权许可的内容。本项目是社区增强版，并非上游官方发布或背书。
 
 ## 反馈
 

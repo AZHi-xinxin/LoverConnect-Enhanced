@@ -13,6 +13,7 @@
 
 | 文件 | 改动 |
 |---|---|
+| `LICENSE` | 经上游维护者明确同意，新增标准 MIT License；同时保留 `LoverConnect` 与 `AZHi-xinxin` 的版权声明。 |
 | `README.md` | 面向用户的“学校”配置改为“工作”。 |
 | `LOCATION-SAFETY.md` | “家 / 学校”“到校”等公开文案改为“家 / 工作”“到工作地点”。 |
 | `app/src/main/java/com/lover/connect/LocationSafetySection.kt` | 可见文案、内部围栏 ID 与局部变量由 `school` 统一迁移为 `work`；未改围栏算法。 |
@@ -42,6 +43,10 @@ Android 侧与本机 rc4 工作树相比，以上五个文件只有术语与对�
 ## 版本策略
 
 本源码保留 `versionCode = 7`、`versionName = "2.3.0-rc4"`，用于证明它与已验收个人版处于同一功能基线。公开最终版的版本号与签名由后续构建者在独立发布目录决定，避免在净化阶段擅自改变版本身份。
+
+## 许可证
+
+上游维护者已明确同意采用 MIT License。本包新增根目录 `LICENSE`，并保留上游与增强版维护者的版权声明。第三方依赖和素材仍遵循各自许可证。
 
 ## 后续构建者检查项
 
