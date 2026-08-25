@@ -1,0 +1,8 @@
+LoverConnect 开源版公开签名信息（2026-08-23 Claude 构建岗生成）
+- 密钥库：lc-open-source-release.jks（全新公开密钥，非个人版密钥）
+- 别名：lc-open-source
+- 算法：RSA 2048 / SHA256withRSA，有效期 10000 天
+- 证书 SHA-256：b2fd4dc1083d5e267c83c908f18bb5d76e9ba746edc8b21fbc07086b865d8cd1
+- 证书 SHA-1：f1d778518c410a2b3abd4def8352b6e8fec5edfe
+- DN：CN=LoverConnect Open Source, OU=AZHi, O=AZHi-xinxin
+- 密码由 Claude 构建岗保管于私有记忆，不随共享目录发布
