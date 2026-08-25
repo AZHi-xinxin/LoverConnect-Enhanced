@@ -1,0 +1,1 @@
+claude mcp write selftest 2026-08-26
