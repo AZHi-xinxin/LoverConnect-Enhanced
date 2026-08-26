@@ -4,7 +4,7 @@
 
 ![Android](https://img.shields.io/badge/Android-Kotlin%20%2B%20Compose-3DDC84)
 ![MCP](https://img.shields.io/badge/MCP-Streamable%20HTTP-6C63FF)
-![Version](https://img.shields.io/badge/version-2.3.0--rc4-blue)
+![Version](https://img.shields.io/badge/version-2.3.0--rc5-blue)
 
 ## 项目说明
 
@@ -43,7 +43,7 @@ LoverConnect 的主要功能只需在手机上安装 APK 即可使用。`server/
 | 方向 | 本版本扩展 |
 |---|---|
 | MCP 工具 | 增加闹钟、锁屏、音乐、截屏观察、应用锁、专注跳转、哨兵与安全状态工具 |
-| 应用锁 | 支持限时锁定、提示文案、自动解锁和锁定列表；系统、电话、支付、地图、健康等敏感应用受永久保护 |
+| 应用锁 | Vivo 兼容模式下 lock_app / focus_rikka / redirect_to_rikka 暂不支持，如实返回；unlock_app / list_locked_apps 仅清理历史数据 |
 | 屏幕观察 | 用户授权后按需截屏分析，可读取本地观察日志 |
 | 安全位置 | 本地加密保存围栏坐标，远端只收到不含经纬度的结构化事件 |
 | 服务端 | 提供可自托管的 Python 接收器，包含鉴权、幂等、限流、离线事件压缩与持久任务 |
@@ -75,11 +75,11 @@ LoverConnect 的主要功能只需在手机上安装 APK 即可使用。`server/
 | 统计 | `reset_screen_time` | 从当前时刻重新计算屏幕使用统计 |
 | 观察 | `take_screenshot` | 在已授权时截取当前屏幕并调用用户配置的视觉模型分析 |
 | 观察 | `read_eyes_log` | 读取“小 L”本地观察日志 |
-| 专注 | `lock_app` | 按包名锁定应用，可设置时长、文案与提示层 |
-| 专注 | `unlock_app` | 解锁指定应用 |
-| 专注 | `list_locked_apps` | 查看当前锁定列表与解锁时间 |
-| 专注 | `focus_rikka` | 仅对用户明确列出的娱乐应用启用专注跳转 |
-| 专注 | `redirect_to_rikka` | 在指定时间窗口内重定向指定应用 |
+| 专注 | `lock_app` | 按包名锁定应用，可设置时长、文案与提示层（Vivo 兼容模式暂不支持，如实返回） |
+| 专注 | `unlock_app` | 解锁指定应用（Vivo 兼容模式仅清理历史数据） |
+| 专注 | `list_locked_apps` | 查看当前锁定列表与解锁时间（Vivo 兼容模式仅清理历史数据） |
+| 专注 | `focus_rikka` | 仅对用户明确列出的娱乐应用启用专注跳转（Vivo 兼容模式暂不支持，如实返回） |
+| 专注 | `redirect_to_rikka` | 在指定时间窗口内重定向指定应用（Vivo 兼容模式暂不支持，如实返回） |
 | 哨兵 | `configure_sentinel` | 配置用户自托管的事件接收端；Token 只保存在手机本地且不会被工具读回 |
 | 哨兵 | `test_sentinel` | 发送一条手动测试事件 |
 | 安全 | `get_location_safety_status` | 读取粗粒度安全状态，不返回坐标或凭据 |
@@ -88,7 +88,7 @@ LoverConnect 的主要功能只需在手机上安装 APK 即可使用。`server/
 
 ## 安装
 
-1. 从仓库的 **Releases** 页面下载公开构建 APK。
+1. 从仓库的 **Releases** 页面下载公开构建 APK（下载 `LoverConnect 2.3.0-rc5` 正式版）。
 2. 对照 Release 中的 SHA-256 与签名指纹校验文件。
 3. 安装并打开 LoverConnect，仅为准备使用的功能授予权限。
 4. 启动 MCP 服务，在 AI 客户端中添加 Streamable HTTP 连接。
@@ -131,6 +131,8 @@ http://127.0.0.1:5000/mcp
 - AI 只能读取开关、粗粒度区域状态和待发送数量，不能静默设置安全区。
 - GPS 丢失、精度不足或单点漂移不会直接判定为离开。
 - 离线期间的旧事件会压缩，恢复网络后不会补发已经失效的离开警报。
+
+> 2.3 版本已把围栏文案由「学校」统一改为「工作」（围栏 id：school → work）。旧版用户覆盖安装后，工作围栏需重新设置一次；家围栏不受影响。
 
 完整设计、事件类型和报备核对边界见 [`LOCATION-SAFETY.md`](LOCATION-SAFETY.md)。
 
@@ -184,20 +186,10 @@ SHA256SUMS.txt        源码文件校验清单
 
 ## 当前状态与限制
 
-- 当前源码版本：`2.3.0-rc4`，属于候选发布版本。
+- 当前源码版本：`2.3.0-rc5`，属于候选发布版本。
 - 屏幕观察需要用户主动授权，并自行配置兼容的视觉模型服务。
 - 音乐工具负责准备搜索并打开应用，不保证绕过第三方音乐 App 的交互限制自动播放。
 - 部分厂商系统会限制后台定位或无障碍服务，实际保活效果取决于设备设置。
-- 安全位置功能只提供陪伴提醒，不监控连续轨迹，也不构成紧急救援承诺。
-
-## 来源与许可
-
-本仓库基于 [LoverConnect/LoverConnect](https://github.com/LoverConnect/LoverConnect) 的公开代码继续开发。感谢上游项目提供最初的 Android MCP 基础。
-
-上游维护者已明确同意采用 MIT License。本社区增强版据此以 MIT License 发布，完整条款见 [`LICENSE`](LICENSE)。许可证文件同时保留上游 `LoverConnect` 与增强版维护者 `AZHi-xinxin` 的版权声明。
-
-第三方依赖、字体、图片或其他素材仍分别适用其自身许可证；MIT License 只覆盖本仓库中版权持有人有权许可的内容。本项目是社区增强版，并非上游官方发布或背书。
-
-## 反馈
-
-欢迎通过本仓库的 Issues 提交可复现的问题。请勿在 Issue、日志或截图中公开 Token、真实坐标、电话号码、会话 ID 或服务器地址。
+- 安全位置功能只提供不携带坐标的粗粒度事件，不做隐蔽监控用途。
+- 下载校验：请对照 rc5 发布资产 `lc.apk`，其 SHA-256 为 `0afd8b0ea817ce092671b5c0f06ecf636c3d78535ec3d62bdf9025195c5e61b8`，安装前请核对。
+- 公开源码与构建说明见 [`OPEN_SOURCE_DIFF.md`](OPEN_SOURCE_DIFF.md)。
