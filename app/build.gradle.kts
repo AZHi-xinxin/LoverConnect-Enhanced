@@ -4,6 +4,60 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
+fun releaseSigningValue(name: String): String? =
+    providers.gradleProperty(name)
+        .orElse(providers.environmentVariable(name))
+        .orNull
+        ?.trim()
+        ?.takeIf { it.isNotEmpty() }
+
+val releaseStoreFile = releaseSigningValue("LC_RELEASE_STORE_FILE")
+val releaseStorePassword = releaseSigningValue("LC_RELEASE_STORE_PASSWORD")
+val releaseKeyAlias = releaseSigningValue("LC_RELEASE_KEY_ALIAS")
+val releaseKeyPassword = releaseSigningValue("LC_RELEASE_KEY_PASSWORD")
+val releaseSigningValues = listOf(
+    releaseStoreFile,
+    releaseStorePassword,
+    releaseKeyAlias,
+    releaseKeyPassword,
+)
+val hasAnyReleaseSigningValue = releaseSigningValues.any { it != null }
+val hasCompleteReleaseSigning = releaseSigningValues.all { it != null }
+val releaseBuildRequested = gradle.startParameter.taskNames.any {
+    val task = it.substringAfterLast(':')
+    task.contains("release", ignoreCase = true) &&
+        listOf("assemble", "bundle", "package", "publish").any { prefix ->
+            task.startsWith(prefix, ignoreCase = true)
+        }
+}
+
+check(!hasAnyReleaseSigningValue || hasCompleteReleaseSigning) {
+    "Release signing configuration is incomplete. Use the private LC_RELEASE_* values."
+}
+check(!releaseBuildRequested || hasCompleteReleaseSigning) {
+    "Release builds require the private LoverConnect release key."
+}
+
+// The direct task-name check above gives an early, clear error for
+// assembleRelease. This task-graph check also catches umbrella commands such
+// as `assemble` or `build` that pull a packaged release in indirectly, while
+// still allowing release-variant unit tests to compile without signing.
+gradle.taskGraph.whenReady {
+    val packagesReleaseArtifact = allTasks.any { task ->
+        if (task.project != project) return@any false
+        val name = task.name.lowercase()
+        name == "packagerelease" ||
+            name == "assemblerelease" ||
+            name == "bundlerelease" ||
+            (name.startsWith("publish") && "release" in name && "unittest" !in name && "androidtest" !in name)
+    }
+    if (packagesReleaseArtifact && !hasCompleteReleaseSigning) {
+        throw org.gradle.api.GradleException(
+            "Release builds require the private LoverConnect release key.",
+        )
+    }
+}
+
 android {
     namespace = "com.lover.connect"
     compileSdk = 36
@@ -12,15 +66,28 @@ android {
         applicationId = "com.lover.connect"
         minSdk = 26
         targetSdk = 36
-        versionCode = 7
-        versionName = "2.3.0-rc4"
+        versionCode = 11
+        versionName = "2.4.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    signingConfigs {
+        if (hasCompleteReleaseSigning) {
+            create("release") {
+                storeFile = rootProject.file(releaseStoreFile!!)
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
+    }
     buildTypes {
         release {
             isMinifyEnabled = false
+            if (hasCompleteReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -36,6 +103,7 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 }
 

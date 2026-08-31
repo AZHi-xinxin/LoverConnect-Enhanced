@@ -27,6 +27,7 @@ class LocationTrackingService : Service(), LocationListener {
     private lateinit var runtimeStore: LocationSafetyRuntimeStore
     private lateinit var eventStore: LocationSafetyEventStore
     private var machine: GeofenceStateMachine? = null
+    private var zoneLabels: Map<String, String> = emptyMap()
     private var snapshot = GeofenceSnapshot()
     private var foregroundStarted = false
     private var locationDegradedQueued = false
@@ -91,6 +92,9 @@ class LocationTrackingService : Service(), LocationListener {
         }
 
         machine = GeofenceStateMachine(config)
+        zoneLabels = config.zones.associate { zone ->
+            zone.id to LocationSafetyRules.normalizeZoneLabel(zone.label)
+        }
         snapshot = runtimeStore.loadSnapshot()
         startLocationForeground(buildNotification("正在等待安全定位"))
         requestLocationUpdates(recovery = false)
@@ -265,7 +269,12 @@ class LocationTrackingService : Service(), LocationListener {
 
     private fun statusText(value: GeofenceSnapshot): String = when (value.state) {
         GeofenceState.UNKNOWN -> "正在校准安全区域"
-        GeofenceState.INSIDE -> "安全区域内：${value.currentZoneId ?: "已配置区域"}"
+        GeofenceState.INSIDE -> {
+            val label = value.currentZoneId?.let(zoneLabels::get)
+                ?: value.currentZoneId
+                ?: "已配置区域"
+            "安全区域内：$label"
+        }
         GeofenceState.EXIT_PENDING -> "正在确认是否离开（防漂移）"
         GeofenceState.AWAY -> "已离开安全区域"
         GeofenceState.RETURN_PENDING -> "正在确认安全到达"

@@ -13,6 +13,7 @@ data class LocationSafetyStatus(
     val preciseLocationGranted: Boolean,
     val backgroundLocationGranted: Boolean,
     val configuredZoneIds: Set<String>,
+    val configuredZoneLabels: Map<String, String>,
     val state: GeofenceState,
     val currentZoneId: String?,
     val pendingEvents: Int,
@@ -71,6 +72,32 @@ object LocationSafetyManager {
         LocationSafetyUploader.cancelRetry(app)
     }
 
+    /** Reloads settings; an edited zone is silently re-baselined, not treated as movement. */
+    fun refreshConfiguration(context: Context, changedZoneId: String? = null) {
+        val app = context.applicationContext
+        val runtime = LocationSafetyRuntimeStore(app)
+        val config = runCatching { SecureLocationConfigStore(app).load() }.getOrNull()
+        if (changedZoneId != null) {
+            runtime.saveSnapshot(
+                LocationSafetyRules.reconcileSnapshotAfterZoneChange(
+                    snapshot = runtime.loadSnapshot(),
+                    changedZoneId = changedZoneId,
+                    configuredZoneIds = config?.zones?.map { it.id }?.toSet().orEmpty(),
+                )
+            )
+        }
+        if (!runtime.isTrackingEnabled() || runtime.isPaused()) return
+        if (config?.zones.isNullOrEmpty()) {
+            stop(app)
+            return
+        }
+        ContextCompat.startForegroundService(
+            app,
+            Intent(app, LocationTrackingService::class.java)
+                .setAction(LocationTrackingService.ACTION_START)
+        )
+    }
+
     fun markReportedOnce(context: Context) {
         LocationSafetyRuntimeStore(context).markReportedOnce()
     }
@@ -127,13 +154,17 @@ object LocationSafetyManager {
         val runtime = LocationSafetyRuntimeStore(app)
         val snapshot = runtime.loadSnapshot()
         val config = runCatching { SecureLocationConfigStore(app).load() }
+        val zones = config.getOrNull()?.zones.orEmpty()
         val pending = LocationSafetyEventStore(app).use { it.pendingCount() }
         return LocationSafetyStatus(
             trackingEnabled = runtime.isTrackingEnabled(),
             paused = runtime.isPaused(),
             preciseLocationGranted = hasPreciseLocation(app),
             backgroundLocationGranted = hasBackgroundLocation(app),
-            configuredZoneIds = config.getOrNull()?.zones?.map { it.id }?.toSet().orEmpty(),
+            configuredZoneIds = zones.map { it.id }.toSet(),
+            configuredZoneLabels = zones.associate { zone ->
+                zone.id to LocationSafetyRules.normalizeZoneLabel(zone.label)
+            },
             state = snapshot.state,
             currentZoneId = snapshot.currentZoneId,
             pendingEvents = pending,

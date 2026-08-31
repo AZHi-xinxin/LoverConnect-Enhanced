@@ -55,6 +55,13 @@ class SecureLocationConfigStore(context: Context) {
         return updated
     }
 
+    fun removeZone(zoneId: String): LocationSafetyConfig {
+        val current = load()
+        val updated = current.copy(zones = current.zones.filterNot { it.id == zoneId })
+        save(updated)
+        return updated
+    }
+
     fun saveSecondReminderMeters(meters: Int): LocationSafetyConfig {
         val updated = load().copy(secondReminderMeters = meters)
         save(updated)

@@ -16,11 +16,11 @@ Content-Type: application/json; charset=utf-8
   rejected at the HTTP boundary.
 - The SQLite database stores event/session state, zone IDs and labels, decision
   metadata, and evidence **message IDs** only.
-- RikkaHub user text is read from the selected conversation branch, evaluated
-  in memory, and never written to this service's database or logs.
-- The optional model fallback receives only the bounded selected-branch text
-  needed for the decision. Leave its three `LC_REPORT_LLM_*` variables unset to
-  use the conservative local rules only.
+- The service never reads RikkaHub conversations. Report state comes only from
+  explicit phone-side structured markers (`reported_override` and
+  `report_acknowledged`).
+- The RikkaHub adapter is send-only: it posts bounded reminder text and does not
+  retrieve conversation bodies, assistant reasoning, or tool content.
 
 ## Event contract
 
@@ -45,20 +45,19 @@ and request throttling returns 429.
 
 ## Reminder behavior
 
-1. A confirmed exit opens an away session and schedules a check after 15
-   minutes.
-2. The checker reads `GET /api/conversations/{conversation_id}` and examines
-   only `node.messages[node.selectIndex]` user messages in the bounded window.
-3. Clear first-person plans (for example, “I am going out” or “I will be home
-   soon”) count as a report. Negative, cancelled, hypothetical, questioned, or
-   third-person statements do not. A model result, when configured, suppresses
-   only at confidence `>= 0.85` with an evidence ID present in the input.
-4. Reader failures retry twice, then fail open by sending the safety reminder.
-5. A distance crossing can cause one final reminder, no sooner than 15 minutes
+1. A confirmed exit opens an away session. If the phone did not attach an
+   explicit one-shot report marker, the first reminder becomes due after the
+   configured grace period.
+2. The phone's “already reported” action sends `reported_override` or a
+   `report_acknowledged` event. Either cancels pending report reminders without
+   exposing chat text.
+3. The server does not guess whether ordinary conversation text counted as a
+   report and has no model fallback.
+4. A distance crossing can cause one final reminder, no sooner than 15 minutes
    after the first. All location notices share a four-per-hour cap.
-6. Arrival cancels pending report checks and is announced once. Offline trips
+5. Arrival cancels pending report checks and is announced once. Offline trips
    collapse to one summary instead of replaying stale departure notices.
-7. `report_acknowledged` cancels future reminders; if one was already sent, a
+6. `report_acknowledged` cancels future reminders; if one was already sent, a
    single correction receipt is posted.
 
 Jobs are persisted in SQLite. Atomic leases prevent concurrent schedulers from
@@ -71,8 +70,8 @@ cd server
 python3 -m unittest -v test_loverconnect_ingress.py
 ```
 
-The suite covers schema privacy, strict validation, selected-branch parsing,
-rule/model decisions, retries, idempotency, arrival/offline/ack flows, rate
+The suite covers schema privacy, strict validation, phone-side report markers,
+retries, idempotency, arrival/offline/ack flows, rate
 limits, concurrent schedulers, the HTTP boundary, and the legacy endpoint.
 
 ## Run

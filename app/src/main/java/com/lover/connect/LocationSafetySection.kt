@@ -62,9 +62,16 @@ fun LocationSafetySection() {
     var reminderKmText by remember {
         mutableStateOf((initialConfig.secondReminderMeters / 1_000).toString())
     }
+    var customZoneName by remember {
+        mutableStateOf(
+            initialConfig.zones.firstOrNull { it.id == LocationSafetyRules.CUSTOM_ZONE_ID }
+                ?.label.orEmpty()
+        )
+    }
     var message by remember { mutableStateOf("") }
     var locatingZone by remember { mutableStateOf<String?>(null) }
     var showClearDialog by remember { mutableStateOf(false) }
+    var showRemoveCustomDialog by remember { mutableStateOf(false) }
 
     fun refresh() {
         status = LocationSafetyManager.status(context)
@@ -89,13 +96,18 @@ fun LocationSafetySection() {
     ) {
         refresh()
         message = if (LocationSafetyManager.hasPreciseLocation(context)) {
-            "已取得精确定位权限。请继续设置家或工作地点。"
+            "已取得精确定位权限。请继续设置至少一个安全围栏。"
         } else {
             "未取得精确定位；安全围栏不会启动。"
         }
     }
 
     fun captureZone(id: String, label: String) {
+        val normalizedLabel = LocationSafetyRules.normalizeZoneLabel(label)
+        if (!LocationSafetyRules.isValidZoneLabel(normalizedLabel)) {
+            message = "围栏名称需为 1–24 个有效字符。"
+            return
+        }
         val radius = radiusText.toIntOrNull()
         if (radius == null || radius !in 200..2_000) {
             message = "围栏半径需为 200–2000 米。"
@@ -119,10 +131,14 @@ fun LocationSafetySection() {
                 }
                 runCatching {
                     SecureLocationConfigStore(context).upsertZone(
-                        SafetyZone(id, label, fix.latitude, fix.longitude, radius)
+                        SafetyZone(id, normalizedLabel, fix.latitude, fix.longitude, radius)
                     )
                 }.onSuccess {
-                    message = "$label 已设置；原始坐标已用 Android Keystore 加密。"
+                    if (id == LocationSafetyRules.CUSTOM_ZONE_ID) {
+                        customZoneName = normalizedLabel
+                    }
+                    LocationSafetyManager.refreshConfiguration(context, changedZoneId = id)
+                    message = "$normalizedLabel 已设置；原始坐标已用 Android Keystore 加密。"
                     refresh()
                 }.onFailure {
                     message = "保存失败：请先清除无法解密的旧配置，再重新设置。"
@@ -141,7 +157,7 @@ fun LocationSafetySection() {
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             Text(
-                "家/工作地点坐标只加密保存在手机；对外事件不含经纬度。GPS 失联或精度差不会被当成离开。",
+                "家、工作和自定义围栏的坐标只加密保存在手机；对外事件不含经纬度。GPS 失联或精度差不会被当成离开。",
                 modifier = Modifier.fillMaxWidth(),
                 fontSize = 12.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -151,8 +167,12 @@ fun LocationSafetySection() {
                 fontSize = 13.sp
             )
             Text(
-                "家：${if ("home" in status.configuredZoneIds) "已设置" else "未设置"}　" +
-                    "工作：${if ("work" in status.configuredZoneIds) "已设置" else "未设置"}",
+                "家：${if (LocationSafetyRules.HOME_ZONE_ID in status.configuredZoneIds) "已设置" else "未设置"}　" +
+                    "工作：${if (LocationSafetyRules.WORK_ZONE_ID in status.configuredZoneIds) "已设置" else "未设置"}",
+                fontSize = 13.sp
+            )
+            Text(
+                "自定义：${status.configuredZoneLabels[LocationSafetyRules.CUSTOM_ZONE_ID] ?: "未设置"}",
                 fontSize = 13.sp
             )
         }
@@ -192,15 +212,58 @@ fun LocationSafetySection() {
     )
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         Button(
-            onClick = { captureZone("home", "家") },
+            onClick = { captureZone(LocationSafetyRules.HOME_ZONE_ID, "家") },
             enabled = locatingZone == null,
             modifier = Modifier.weight(1f)
-        ) { Text(if (locatingZone == "home") "定位中…" else "当前位置设为家") }
+        ) { Text(if (locatingZone == LocationSafetyRules.HOME_ZONE_ID) "定位中…" else "当前位置设为家") }
         Button(
-            onClick = { captureZone("work", "工作") },
+            onClick = { captureZone(LocationSafetyRules.WORK_ZONE_ID, "工作") },
             enabled = locatingZone == null,
             modifier = Modifier.weight(1f)
-        ) { Text(if (locatingZone == "work") "定位中…" else "设为工作") }
+        ) { Text(if (locatingZone == LocationSafetyRules.WORK_ZONE_ID) "定位中…" else "设为工作") }
+    }
+
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier.fillMaxWidth().padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Text("自定义围栏", fontSize = 16.sp)
+            Text(
+                "可以设置一个你自己命名的地点，例如健身房、常去的公园或朋友家；名称会随到达/离开事件使用，坐标仍只加密留在本机。",
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            OutlinedTextField(
+                value = customZoneName,
+                onValueChange = { customZoneName = it.take(LocationSafetyRules.MAX_ZONE_LABEL_LENGTH) },
+                label = { Text("围栏名称（1–24 字）") },
+                placeholder = { Text("例如：健身房") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = {
+                        captureZone(LocationSafetyRules.CUSTOM_ZONE_ID, customZoneName)
+                    },
+                    enabled = locatingZone == null &&
+                        LocationSafetyRules.isValidZoneLabel(customZoneName),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text(
+                        if (locatingZone == LocationSafetyRules.CUSTOM_ZONE_ID) "定位中…"
+                        else "当前位置设为此围栏"
+                    )
+                }
+                OutlinedButton(
+                    onClick = { showRemoveCustomDialog = true },
+                    enabled = LocationSafetyRules.CUSTOM_ZONE_ID in status.configuredZoneIds &&
+                        locatingZone == null,
+                    modifier = Modifier.weight(1f)
+                ) { Text("删除自定义围栏") }
+            }
+        }
     }
 
     OutlinedTextField(
@@ -218,6 +281,7 @@ fun LocationSafetySection() {
             } else {
                 runCatching { SecureLocationConfigStore(context).saveSecondReminderMeters(km * 1_000) }
                     .onSuccess { config ->
+                        LocationSafetyManager.refreshConfiguration(context)
                         val home = config.zones.firstOrNull { it.id == "home" }
                         val work = config.zones.firstOrNull { it.id == "work" }
                         val homeToWork = if (home != null && work != null) {
@@ -333,10 +397,11 @@ fun LocationSafetySection() {
         AlertDialog(
             onDismissRequest = { showClearDialog = false },
             title = { Text("清除安全位置数据？") },
-            text = { Text("将关闭跟踪并删除本机加密的家/工作地点坐标、状态与待发送事件。此操作不会影响其他 LoverConnect 功能。") },
+            text = { Text("将关闭跟踪并删除本机加密的家、工作及自定义围栏坐标、状态与待发送事件。此操作不会影响其他 LoverConnect 功能。") },
             confirmButton = {
                 TextButton(onClick = {
                     LocationSafetyManager.clearAll(context)
+                    customZoneName = ""
                     showClearDialog = false
                     message = "安全位置数据已清除。"
                     refresh()
@@ -344,6 +409,36 @@ fun LocationSafetySection() {
             },
             dismissButton = {
                 TextButton(onClick = { showClearDialog = false }) { Text("取消") }
+            }
+        )
+    }
+
+    if (showRemoveCustomDialog) {
+        AlertDialog(
+            onDismissRequest = { showRemoveCustomDialog = false },
+            title = { Text("删除自定义围栏？") },
+            text = { Text("只删除这个自定义围栏的名称与本机加密坐标；家、工作及其他 LoverConnect 数据不受影响。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    runCatching {
+                        SecureLocationConfigStore(context)
+                            .removeZone(LocationSafetyRules.CUSTOM_ZONE_ID)
+                    }.onSuccess {
+                        customZoneName = ""
+                        LocationSafetyManager.refreshConfiguration(
+                            context,
+                            changedZoneId = LocationSafetyRules.CUSTOM_ZONE_ID,
+                        )
+                        message = "自定义围栏已删除。"
+                        refresh()
+                    }.onFailure {
+                        message = "删除失败：配置不可读，请使用“清除全部安全位置数据”。"
+                    }
+                    showRemoveCustomDialog = false
+                }) { Text("确认删除") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showRemoveCustomDialog = false }) { Text("取消") }
             }
         )
     }
