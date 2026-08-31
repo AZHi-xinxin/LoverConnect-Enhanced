@@ -49,7 +49,11 @@
             android:name=".McpService"
             android:enabled="true"
             android:exported="false"
-            android:foregroundServiceType="specialUse" />
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Runs the user-enabled local-only MCP endpoint and short-lived device-context sensors for the on-device AI client." />
+        </service>
 
         <service
             android:name=".LocationTrackingService"
@@ -61,7 +65,11 @@
             android:name=".AlarmRingService"
             android:enabled="true"
             android:exported="false"
-            android:foregroundServiceType="specialUse" />
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Plays alarms explicitly scheduled by the phone user or connected on-device AI client." />
+        </service>
 
         <service
             android:name=".MusicListenerService"

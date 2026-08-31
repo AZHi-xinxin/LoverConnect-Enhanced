@@ -18,6 +18,8 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
@@ -31,8 +33,6 @@ import androidx.core.content.ContextCompat
 import com.lover.connect.ui.theme.LoverConnectTheme
 import org.json.JSONArray
 import org.json.JSONObject
-import java.net.Inet4Address
-import java.net.NetworkInterface
 
 class MainActivity : ComponentActivity() {
 
@@ -78,6 +78,7 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
+@OptIn(ExperimentalMaterial3Api::class)
 fun MainScreen() {
     val context = LocalContext.current
     val prefs = context.getSharedPreferences("lc_config", Context.MODE_PRIVATE)
@@ -88,6 +89,7 @@ fun MainScreen() {
     var newAnnName by remember { mutableStateOf("") }
     var newAnnDate by remember { mutableStateOf("") }
     var newAnnType by remember { mutableStateOf("countup") }
+    var showDatePicker by remember { mutableStateOf(false) }
     var anniversaries by remember { mutableStateOf(loadAnniversaries(prefs)) }
 // 小L配置
     var aiName by remember { mutableStateOf(prefs.getString("ai_name", "") ?: "") }
@@ -101,10 +103,12 @@ fun MainScreen() {
     var visionApiUrl by remember { mutableStateOf(prefs.getString("vision_api_url", "") ?: "") }
     var visionApiKey by remember { mutableStateOf(prefs.getString("vision_api_key", "") ?: "") }
     var visionModel by remember { mutableStateOf(prefs.getString("vision_model", "") ?: "") }
+    var visionConfigMessage by remember { mutableStateOf("") }
 
     // 截屏授权
 
     var memoryMessage by remember { mutableStateOf("") }
+    val localMcpEndpoint = remember { McpLocalSecurity.endpoint(context) }
 
     val exportLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument("application/json")
@@ -142,7 +146,6 @@ fun MainScreen() {
         }
     }
 
-    val ipAddress = remember { getLocalIpAddress() }
 
     Column(
         modifier = Modifier
@@ -191,13 +194,19 @@ fun MainScreen() {
             Column(modifier = Modifier.padding(12.dp)) {
                 Text("MCP地址（填入RikkaHub）：", fontSize = 12.sp)
                 Text(
-                    text = "http://${ipAddress}:5000/mcp",
-                    fontSize = 16.sp,
+                    text = localMcpEndpoint,
+                    fontSize = 13.sp,
                     color = MaterialTheme.colorScheme.primary
                 )
                 Spacer(modifier = Modifier.height(4.dp))
+                OutlinedButton(onClick = {
+                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                    clipboard.setPrimaryClip(android.content.ClipData.newPlainText("LoverConnect MCP", localMcpEndpoint))
+                }) {
+                    Text("复制本机私密 MCP 地址")
+                }
                 Text(
-                    text = "手机和RikkaHub在同一设备上时用：\nhttp://127.0.0.1:5000/mcp",
+                    text = "覆盖安装后请把 RikkaHub 的旧 /mcp 地址替换为上方私密地址。它只接受本机连接，请勿把完整地址发给其他人。",
                     fontSize = 12.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -287,6 +296,10 @@ fun MainScreen() {
         }, modifier = Modifier.fillMaxWidth()) {
             Text("通知使用权（音乐感知必需）")
         }
+
+        HorizontalDivider()
+
+        DeviceContextSection()
 
         HorizontalDivider()
 
@@ -402,13 +415,26 @@ fun MainScreen() {
         )
 
         Button(onClick = {
-            prefs.edit()
-                .putString("vision_api_url", visionApiUrl.trim())
-                .putString("vision_api_key", visionApiKey.trim())
-                .putString("vision_model", visionModel.trim())
-                .apply()
+            val normalizedUrl = visionApiUrl.trim()
+            if (!VisionApiEndpointPolicy.isAllowed(normalizedUrl)) {
+                visionConfigMessage = "API 地址必须使用 HTTPS；只有本机 127.0.0.1/localhost 可使用 HTTP。"
+            } else {
+                prefs.edit()
+                    .putString("vision_api_url", normalizedUrl)
+                    .putString("vision_api_key", visionApiKey.trim())
+                    .putString("vision_model", visionModel.trim())
+                    .apply()
+                visionConfigMessage = "API 配置已安全保存"
+            }
         }) {
             Text("保存API配置")
+        }
+        if (visionConfigMessage.isNotEmpty()) {
+            Text(
+                visionConfigMessage,
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
         HorizontalDivider()
 
@@ -443,25 +469,56 @@ fun MainScreen() {
         if (anniversaries.isEmpty()) {
             Text("暂无纪念日", fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
         } else {
-            anniversaries.forEachIndexed { index, ann ->
-                Card(modifier = Modifier.fillMaxWidth()) {
-                    Row(
-                        modifier = Modifier.padding(12.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(ann.name, fontSize = 14.sp)
-                            Text(
-                                "${ann.date}（${if (ann.type == "countup") "正计时" else "倒计时"}）",
-                                fontSize = 12.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                        TextButton(onClick = {
-                            anniversaries = anniversaries.toMutableList().apply { removeAt(index) }
-                            saveAnniversaries(prefs, anniversaries)
-                        }) {
-                            Text("删除")
+            val sorted = anniversaries.sortedByDescending { it.pinned }
+            LazyColumn(modifier = Modifier.heightIn(max = 340.dp)) {
+                itemsIndexed(sorted) { _, ann ->
+                    Card(modifier = Modifier.fillMaxWidth()) {
+                        Row(
+                            modifier = Modifier.padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    if (ann.pinned) {
+                                        Text("📌", fontSize = 14.sp)
+                                    }
+                                    Text(ann.name, fontSize = 14.sp)
+                                }
+                                Text(
+                                    "${ann.date} · ${if (ann.type == "countup") "第 ${calcAnniversaryDays(ann.date, ann.type)} 天" else "还剩 ${calcAnniversaryDays(ann.date, ann.type)} 天"}",
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            TextButton(onClick = {
+                                val pinnedCount = anniversaries.count { it.pinned }
+                                val idx = anniversaries.indexOfFirst { it.name == ann.name && it.date == ann.date }
+                                if (idx >= 0) {
+                                    val target = anniversaries[idx]
+                                    val updated = anniversaries.toMutableList()
+                                    if (target.pinned) {
+                                        updated[idx] = target.copy(pinned = false)
+                                        anniversaries = updated
+                                        saveAnniversaries(prefs, anniversaries)
+                                    } else if (pinnedCount < 3) {
+                                        updated[idx] = target.copy(pinned = true)
+                                        anniversaries = updated
+                                        saveAnniversaries(prefs, anniversaries)
+                                    } else {
+                                        android.widget.Toast.makeText(context, "置顶数已满（最多3个），请先取消一个", android.widget.Toast.LENGTH_SHORT).show()
+                                    }
+                                }
+                            }) {
+                                Text(if (ann.pinned) "取消置顶" else "置顶")
+                            }
+                            TextButton(onClick = {
+                                anniversaries = anniversaries.toMutableList().apply {
+                                    removeAll { it.name == ann.name && it.date == ann.date }
+                                }
+                                saveAnniversaries(prefs, anniversaries)
+                            }) {
+                                Text("删除")
+                            }
                         }
                     }
                 }
@@ -476,13 +533,18 @@ fun MainScreen() {
             modifier = Modifier.fillMaxWidth(),
             singleLine = true
         )
-        OutlinedTextField(
-            value = newAnnDate,
-            onValueChange = { newAnnDate = it },
-            label = { Text("日期（格式：2025-01-31）") },
-            modifier = Modifier.fillMaxWidth(),
-            singleLine = true
-        )
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedTextField(
+                value = newAnnDate,
+                onValueChange = { newAnnDate = it },
+                label = { Text("日期（2026-7-10 或 2026-07-10 均可）") },
+                modifier = Modifier.weight(1f),
+                singleLine = true
+            )
+            OutlinedButton(onClick = { showDatePicker = true }) {
+                Text("选日期")
+            }
+        }
         Row(verticalAlignment = Alignment.CenterVertically) {
             RadioButton(
                 selected = newAnnType == "countup",
@@ -497,14 +559,39 @@ fun MainScreen() {
             Text("倒计时（还有X天）", fontSize = 14.sp)
         }
         Button(onClick = {
-            if (newAnnName.isNotBlank() && newAnnDate.matches(Regex("\\d{4}-\\d{2}-\\d{2}"))) {
-                anniversaries = anniversaries + AnniversaryItem(newAnnName.trim(), newAnnDate.trim(), newAnnType)
+            val normalized = normalizeDate(newAnnDate)
+            if (newAnnName.isNotBlank() && normalized != null) {
+                anniversaries = anniversaries + AnniversaryItem(newAnnName.trim(), normalized, newAnnType)
                 saveAnniversaries(prefs, anniversaries)
                 newAnnName = ""
                 newAnnDate = ""
+            } else if (newAnnName.isNotBlank() && normalized == null) {
+                android.widget.Toast.makeText(context, "日期格式不对，请填如 2026-7-10", android.widget.Toast.LENGTH_SHORT).show()
             }
         }) {
             Text("添加")
+        }
+        if (showDatePicker) {
+            val datePickerState = rememberDatePickerState()
+            DatePickerDialog(
+                onDismissRequest = { showDatePicker = false },
+                confirmButton = {
+                    TextButton(onClick = {
+                        datePickerState.selectedDateMillis?.let { millis ->
+                            newAnnDate = java.time.Instant.ofEpochMilli(millis)
+                                .atZone(java.time.ZoneId.systemDefault())
+                                .toLocalDate()
+                                .toString()
+                        }
+                        showDatePicker = false
+                    }) { Text("确定") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showDatePicker = false }) { Text("取消") }
+                }
+            ) {
+                DatePicker(state = datePickerState, showModeToggle = false)
+            }
         }
         HorizontalDivider()
 
@@ -534,7 +621,7 @@ fun MainScreen() {
 }
 // ===== 数据类和工具函数 =====
 
-data class AnniversaryItem(val name: String, val date: String, val type: String)
+data class AnniversaryItem(val name: String, val date: String, val type: String, val pinned: Boolean = false)
 
 fun loadAnniversaries(prefs: android.content.SharedPreferences): List<AnniversaryItem> {
     val json = prefs.getString("anniversaries", null) ?: return emptyList()
@@ -545,7 +632,8 @@ fun loadAnniversaries(prefs: android.content.SharedPreferences): List<Anniversar
             AnniversaryItem(
                 obj.getString("name"),
                 obj.getString("date"),
-                obj.optString("type", "countdown")
+                obj.optString("type", "countdown"),
+                obj.optBoolean("pinned", false)
             )
         }
     } catch (_: Exception) { emptyList() }
@@ -558,24 +646,32 @@ fun saveAnniversaries(prefs: android.content.SharedPreferences, list: List<Anniv
             put("name", item.name)
             put("date", item.date)
             put("type", item.type)
+            put("pinned", item.pinned)
         })
     }
     prefs.edit().putString("anniversaries", arr.toString()).apply()
 }
 
-fun getLocalIpAddress(): String {
-    try {
-        val interfaces = NetworkInterface.getNetworkInterfaces()
-        while (interfaces.hasMoreElements()) {
-            val intf = interfaces.nextElement()
-            val addrs = intf.inetAddresses
-            while (addrs.hasMoreElements()) {
-                val addr = addrs.nextElement()
-                if (!addr.isLoopbackAddress && addr is Inet4Address) {
-                    return addr.hostAddress ?: "127.0.0.1"
-                }
-            }
-        }
-    } catch (_: Exception) {}
-    return "127.0.0.1"
+fun normalizeDate(input: String): String? {
+    return try {
+        val parts = input.trim().split("-")
+        if (parts.size != 3) return null
+        val year = parts[0].toInt()
+        val month = parts[1].toInt()
+        val day = parts[2].toInt()
+        java.time.LocalDate.of(year, month, day).toString()
+    } catch (_: Exception) { null }
 }
+
+fun calcAnniversaryDays(date: String, type: String): Long {
+    return try {
+        val target = java.time.LocalDate.parse(date)
+        val today = java.time.LocalDate.now()
+        if (type == "countup") {
+            java.time.temporal.ChronoUnit.DAYS.between(target, today) + 1
+        } else {
+            java.time.temporal.ChronoUnit.DAYS.between(today, target)
+        }
+    } catch (_: Exception) { 0L }
+}
+

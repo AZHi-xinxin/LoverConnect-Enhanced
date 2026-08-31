@@ -6,8 +6,16 @@
    See https://developer.android.com/about/versions/12/backup-restore
 -->
 <full-backup-content>
+    <!-- User/API/sentinel configuration and personal AI memory stay on this phone. -->
+    <exclude domain="sharedpref" path="lc_config.xml" />
+    <exclude domain="sharedpref" path="lc_diagnostics.xml" />
+    <exclude domain="file" path="lc_memory.json" />
+    <exclude domain="file" path="lc_eyes_log.txt" />
     <!-- Android Keystore keys are non-exportable; do not move their ciphertext. -->
     <exclude domain="sharedpref" path="lc_location_secure.xml" />
     <exclude domain="sharedpref" path="lc_location_runtime.xml" />
+    <exclude domain="sharedpref" path="lc_device_context_config.xml" />
+    <exclude domain="sharedpref" path="lc_device_context_runtime.xml" />
+    <exclude domain="sharedpref" path="lc_mcp_security.xml" />
     <exclude domain="database" path="lc_location_events.db" />
 </full-backup-content>

@@ -12,10 +12,12 @@ import android.hardware.SensorManager
 import android.os.IBinder
 import android.os.PowerManager
 import android.provider.AlarmClock
+import java.io.BufferedInputStream
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.net.ServerSocket
 import java.net.Socket
+import java.net.InetAddress
 import java.text.SimpleDateFormat
 import java.util.*
 import org.json.JSONArray
@@ -23,17 +25,30 @@ import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 import java.time.LocalDate
+import java.util.concurrent.ArrayBlockingQueue
+import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
 
 class McpService : Service(), SensorEventListener {
 
     private var serverSocket: ServerSocket? = null
+    private var serverThread: Thread? = null
+    private val clientExecutor = ThreadPoolExecutor(
+        2,
+        4,
+        30L,
+        TimeUnit.SECONDS,
+        ArrayBlockingQueue(16),
+    )
     private var isRunning = false
     private val PORT = 5000
-    private var wakeLock: PowerManager.WakeLock? = null
 
     private var stepState = DailyStepState()
     private var stepCount: Int = 0
+    private var lastStepEventAt: Long = 0L
     private var sensorManager: SensorManager? = null
+    private var deviceContextCollector: DeviceContextCollector? = null
 
     private var resetTimestamp: Long = 0L
 
@@ -47,12 +62,24 @@ class McpService : Service(), SensorEventListener {
         private const val STEP_DATE = "date"
         private const val STEP_COUNT = "count"
         private const val STEP_LAST_SENSOR_TOTAL = "last_sensor_total"
+        private const val STEP_LAST_EVENT_AT = "last_event_at"
+        private const val MAX_REQUEST_BODY_BYTES = 1_048_576
+        private const val MAX_HTTP_LINE_BYTES = 8_192
+        private const val MAX_HTTP_HEADER_BYTES = 32_768
+        private const val MAX_HTTP_HEADER_LINES = 64
         var instance: McpService? = null
+
+        fun refreshDeviceContextCollection() {
+            instance?.deviceContextCollector?.refresh()
+        }
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        getSharedPreferences("lc_diagnostics", Context.MODE_PRIVATE).edit()
+            .putLong("mcp_last_start_at", System.currentTimeMillis())
+            .apply()
         startEyesTimer()
         return START_STICKY
     }
@@ -62,29 +89,39 @@ class McpService : Service(), SensorEventListener {
     override fun onCreate() {
         super.onCreate()
         instance = this
+        getSharedPreferences("lc_diagnostics", Context.MODE_PRIVATE).edit()
+            .putBoolean("mcp_service_alive", true)
+            .putLong("mcp_created_at", System.currentTimeMillis())
+            .apply()
         createNotificationChannel()
         val notification = buildNotification()
         startForeground(NOTIFICATION_ID, notification)
-
-        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-        wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "LoverConnect::MCP").apply { acquire() }
 
         restoreStepState()
         sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
         val stepSensor = sensorManager?.getDefaultSensor(Sensor.TYPE_STEP_COUNTER)
         stepSensor?.let { sensorManager?.registerListener(this, it, SensorManager.SENSOR_DELAY_UI) }
+        deviceContextCollector = DeviceContextCollector(this).also { it.start() }
 
         startServer()
     }
 
     override fun onDestroy() {
-        super.onDestroy()
         instance = null
+        getSharedPreferences("lc_diagnostics", Context.MODE_PRIVATE).edit()
+            .putBoolean("mcp_service_alive", false)
+            .putLong("mcp_destroyed_at", System.currentTimeMillis())
+            .apply()
         isRunning = false
         serverSocket?.close()
-        wakeLock?.release()
+        serverThread?.interrupt()
+        serverThread = null
+        clientExecutor.shutdownNow()
         sensorManager?.unregisterListener(this)
+        deviceContextCollector?.stop()
+        deviceContextCollector = null
         eyesTimer?.cancel()
+        super.onDestroy()
 
         // 被杀后5秒自动重启
         val restartIntent = Intent(applicationContext, McpService::class.java)
@@ -114,6 +151,7 @@ class McpService : Service(), SensorEventListener {
                 val totalSteps = it.values[0].toInt()
                 stepState = DailyStepCounter.update(stepState, currentStepDate(), totalSteps)
                 stepCount = stepState.count
+                lastStepEventAt = System.currentTimeMillis()
                 persistStepState()
             }
         }
@@ -132,9 +170,11 @@ class McpService : Service(), SensorEventListener {
         )
         if (stepState.date != currentStepDate()) {
             stepState = DailyStepState(date = currentStepDate())
+            lastStepEventAt = 0L
             persistStepState()
         }
         stepCount = stepState.count
+        lastStepEventAt = prefs.getLong(STEP_LAST_EVENT_AT, 0L)
     }
 
     private fun persistStepState() {
@@ -142,6 +182,7 @@ class McpService : Service(), SensorEventListener {
             .putString(STEP_DATE, stepState.date)
             .putInt(STEP_COUNT, stepState.count)
             .putInt(STEP_LAST_SENSOR_TOTAL, stepState.lastSensorTotal)
+            .putLong(STEP_LAST_EVENT_AT, lastStepEventAt)
             .apply()
     }
 
@@ -150,6 +191,7 @@ class McpService : Service(), SensorEventListener {
         if (stepState.date != today) {
             stepState = DailyStepState(date = today)
             stepCount = 0
+            lastStepEventAt = 0L
             persistStepState()
         }
     }
@@ -157,47 +199,104 @@ class McpService : Service(), SensorEventListener {
 
     private fun startServer() {
         isRunning = true
-        Thread {
+        serverThread = Thread {
             try {
-                serverSocket = ServerSocket(PORT)
+                // Context data is private. RikkaHub runs on the same phone, so
+                // the MCP endpoint must not be readable by other LAN devices.
+                serverSocket = ServerSocket(PORT, 50, InetAddress.getByName("127.0.0.1"))
                 while (isRunning) {
                     val client = serverSocket?.accept() ?: break
-                    Thread { handleClient(client) }.start()
+                    try {
+                        clientExecutor.execute { handleClient(client) }
+                    } catch (_: RejectedExecutionException) {
+                        runCatching { client.close() }
+                    }
                 }
             } catch (_: Exception) {}
-        }.start()
+        }.apply {
+            name = "LoverConnect-MCP-Acceptor"
+            start()
+        }
     }
 
     private fun handleClient(socket: Socket) {
+        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+        var requestWakeLock: PowerManager.WakeLock? = null
         try {
-            val input = BufferedReader(InputStreamReader(socket.getInputStream()))
+            socket.soTimeout = 15_000
+            val input = BufferedInputStream(socket.getInputStream())
             val output = socket.getOutputStream()
 
-            val requestLine = input.readLine() ?: return
+            val requestLine = LocalHttpWire.readAsciiLine(input, MAX_HTTP_LINE_BYTES) ?: return
+            if (!McpLocalSecurity.isAuthorizedRequestLine(this, requestLine)) {
+                writeHttpJson(output, "401 Unauthorized", "{\"error\":\"invalid_local_mcp_endpoint\"}")
+                return
+            }
+
+            requestWakeLock = pm.newWakeLock(
+                PowerManager.PARTIAL_WAKE_LOCK,
+                "LoverConnect::MCPRequest",
+            ).also { it.acquire(60_000L) }
+
             val headers = mutableMapOf<String, String>()
-            var line = input.readLine()
+            var headerBytes = 0
+            var headerLines = 0
+            var line = LocalHttpWire.readAsciiLine(input, MAX_HTTP_LINE_BYTES)
             while (!line.isNullOrEmpty()) {
-                val parts = line.split(": ", limit = 2)
-                if (parts.size == 2) headers[parts[0].lowercase()] = parts[1]
-                line = input.readLine()
+                headerLines += 1
+                headerBytes += line.length + 2
+                if (headerLines > MAX_HTTP_HEADER_LINES || headerBytes > MAX_HTTP_HEADER_BYTES) {
+                    writeHttpJson(output, "431 Request Header Fields Too Large", "{\"error\":\"request_headers_too_large\"}")
+                    return
+                }
+                val separator = line.indexOf(':')
+                if (separator > 0) {
+                    headers[line.substring(0, separator).trim().lowercase()] =
+                        line.substring(separator + 1).trim()
+                }
+                line = LocalHttpWire.readAsciiLine(input, MAX_HTTP_LINE_BYTES)
+            }
+
+            // Native RikkaHub requests do not send Origin. Reject browser-origin
+            // access even on loopback so a webpage cannot read private context.
+            if (!headers["origin"].isNullOrBlank()) {
+                writeHttpJson(output, "403 Forbidden", "{\"error\":\"browser_origin_not_allowed\"}")
+                return
             }
 
             val contentLength = headers["content-length"]?.toIntOrNull() ?: 0
+            if (contentLength !in 0..MAX_REQUEST_BODY_BYTES) {
+                writeHttpJson(output, "413 Content Too Large", "{\"error\":\"request_body_too_large\"}")
+                return
+            }
             val body = if (contentLength > 0) {
-                val buf = CharArray(contentLength)
-                input.read(buf, 0, contentLength)
-                String(buf)
+                String(
+                    LocalHttpWire.readExactBody(input, contentLength, MAX_REQUEST_BODY_BYTES),
+                    Charsets.UTF_8,
+                )
             } else ""
 
             val response = handleMcpRequest(body)
-
-            val httpResponse = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Headers: *\r\nAccess-Control-Allow-Methods: *\r\nContent-Length: ${response.toByteArray().size}\r\n\r\n$response"
-            output.write(httpResponse.toByteArray())
+            val responseBytes = response.toByteArray(Charsets.UTF_8)
+            val httpResponse = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nCache-Control: no-store\r\nContent-Length: ${responseBytes.size}\r\n\r\n"
+            output.write(httpResponse.toByteArray(Charsets.UTF_8))
+            output.write(responseBytes)
             output.flush()
-            socket.close()
         } catch (_: Exception) {
+        } finally {
+            requestWakeLock?.let { if (it.isHeld) it.release() }
             try { socket.close() } catch (_: Exception) {}
         }
+    }
+
+    private fun writeHttpJson(output: java.io.OutputStream, status: String, body: String) {
+        val bodyBytes = body.toByteArray(Charsets.UTF_8)
+        output.write(
+            "HTTP/1.1 $status\r\nContent-Type: application/json\r\nCache-Control: no-store\r\nConnection: close\r\nContent-Length: ${bodyBytes.size}\r\n\r\n"
+                .toByteArray(Charsets.UTF_8),
+        )
+        output.write(bodyBytes)
+        output.flush()
     }
 
     private fun handleMcpRequest(body: String): String {
@@ -211,7 +310,7 @@ class McpService : Service(), SensorEventListener {
                     })
                     put("serverInfo", JSONObject().apply {
                         put("name", "LoverConnect")
-                        put("version", "2.0.0")
+                        put("version", BuildConfig.VERSION_NAME)
                     })
                 })
                 put("id", 1)
@@ -234,7 +333,7 @@ class McpService : Service(), SensorEventListener {
                             })
                             put("serverInfo", JSONObject().apply {
                                 put("name", "LoverConnect")
-                                put("version", "2.0.0")
+                                put("version", BuildConfig.VERSION_NAME)
                             })
                         })
                         put("id", id)
@@ -390,7 +489,7 @@ class McpService : Service(), SensorEventListener {
             })
             put(JSONObject().apply {
                 put("name", "lock_app")
-                put("description", "Lock an entertainment app. Configure this tool to require manual approval in RikkaHub.")
+                put("description", "Lock an entertainment app. NOT SUPPORTED in Vivo compat mode: the call honestly reports 暂不支持 and writes nothing. Configure this tool to require manual approval in RikkaHub.")
                 put("inputSchema", JSONObject().apply {
                     put("type", "object")
                     put("properties", JSONObject().apply {
@@ -404,7 +503,7 @@ class McpService : Service(), SensorEventListener {
             })
             put(JSONObject().apply {
                 put("name", "unlock_app")
-                put("description", "Unlock one app by package name")
+                put("description", "Unlock one app by package name. In Vivo compat mode this only clears legacy locked-list entries (no interception is enforced).")
                 put("inputSchema", JSONObject().apply {
                     put("type", "object")
                     put("properties", JSONObject().apply { put("package_name", JSONObject().apply { put("type", "string") }) })
@@ -413,7 +512,7 @@ class McpService : Service(), SensorEventListener {
             })
             put(JSONObject().apply {
                 put("name", "focus_rikka")
-                put("description", "Redirect only explicitly listed entertainment apps to RikkaHub. Requires manual approval.")
+                put("description", "Redirect only explicitly listed entertainment apps to RikkaHub. NOT SUPPORTED in Vivo compat mode: the call honestly reports 暂不支持 and writes nothing. Requires manual approval.")
                 put("inputSchema", JSONObject().apply {
                     put("type", "object")
                     put("properties", JSONObject().apply {
@@ -425,7 +524,7 @@ class McpService : Service(), SensorEventListener {
             })
             put(JSONObject().apply {
                 put("name", "redirect_to_rikka")
-                put("description", "Redirect selected safe apps to RikkaHub during an HH:mm-HH:mm window. Empty list disables it.")
+                put("description", "Redirect selected safe apps to RikkaHub during an HH:mm-HH:mm window. NOT SUPPORTED in Vivo compat mode: the call honestly reports 暂不支持 and writes nothing. Empty list disables it.")
                 put("inputSchema", JSONObject().apply {
                     put("type", "object")
                     put("properties", JSONObject().apply {
@@ -437,7 +536,7 @@ class McpService : Service(), SensorEventListener {
             })
             put(JSONObject().apply {
                 put("name", "list_locked_apps")
-                put("description", "List apps currently locked by LoverConnect")
+                put("description", "List apps currently locked by LoverConnect (in Vivo compat mode this is legacy config only — no interception is enforced)")
                 put("inputSchema", JSONObject().apply { put("type", "object"); put("properties", JSONObject()) })
             })
             put(JSONObject().apply {
@@ -449,6 +548,11 @@ class McpService : Service(), SensorEventListener {
                         put("lines", JSONObject().apply { put("type", "integer"); put("description", "读取行数，默认20") })
                     })
                 })
+            })
+            put(JSONObject().apply {
+                put("name", "get_l_service_status")
+                put("description", "Read Little L and accessibility lifecycle diagnostics without exposing secrets")
+                put("inputSchema", JSONObject().apply { put("type", "object"); put("properties", JSONObject()) })
             })
             put(JSONObject().apply {
                 put("name", "configure_sentinel")
@@ -471,6 +575,31 @@ class McpService : Service(), SensorEventListener {
             put(JSONObject().apply {
                 put("name", "get_location_safety_status")
                 put("description", "Read coarse LoverConnect safety status. Never returns coordinates or secrets.")
+                put("inputSchema", JSONObject().apply { put("type", "object"); put("properties", JSONObject()) })
+            })
+            put(JSONObject().apply {
+                put("name", "get_device_context")
+                put("description", "Read a structured, short-lived device-context snapshot. Device facts and uncertain inferences are separated; human posture, sleep, identity, and raw coordinates are never inferred or returned.")
+                put("inputSchema", JSONObject().apply { put("type", "object"); put("properties", JSONObject()) })
+            })
+            put(JSONObject().apply {
+                put("name", "get_recent_context_events")
+                put("description", "Read recent local device-context transitions (maximum 50, retained up to 24 hours).")
+                put("inputSchema", JSONObject().apply {
+                    put("type", "object")
+                    put("properties", JSONObject().apply {
+                        put("limit", JSONObject().apply {
+                            put("type", "integer")
+                            put("minimum", 1)
+                            put("maximum", 50)
+                            put("default", 20)
+                        })
+                    })
+                })
+            })
+            put(JSONObject().apply {
+                put("name", "get_context_capabilities")
+                put("description", "Read device-context sensors, privacy toggles, retention, and delivery-channel capabilities.")
                 put("inputSchema", JSONObject().apply { put("type", "object"); put("properties", JSONObject()) })
             })
         }
@@ -504,6 +633,7 @@ class McpService : Service(), SensorEventListener {
             "get_now_playing" -> toolGetNowPlaying()
             "take_screenshot" -> toolTakeScreenshot()
             "read_eyes_log" -> toolReadEyesLog(args)
+            "get_l_service_status" -> toolGetLServiceStatus()
             "lock_app" -> toolLockApp(args)
             "unlock_app" -> toolUnlockApp(args)
             "list_locked_apps" -> toolListLockedApps()
@@ -512,6 +642,9 @@ class McpService : Service(), SensorEventListener {
             "configure_sentinel" -> toolConfigureSentinel(args)
             "test_sentinel" -> toolTestSentinel()
             "get_location_safety_status" -> toolGetLocationSafetyStatus()
+            "get_device_context" -> toolGetDeviceContext()
+            "get_recent_context_events" -> toolGetRecentContextEvents(args)
+            "get_context_capabilities" -> toolGetContextCapabilities()
             else -> "未知工具：$toolName"
         }
 
@@ -937,19 +1070,54 @@ class McpService : Service(), SensorEventListener {
         return readRecentEyesLog(lines)
     }
 
+    private fun toolGetLServiceStatus(): String {
+        val config = getSharedPreferences("lc_config", Context.MODE_PRIVATE)
+        val diagnostics = getSharedPreferences("lc_diagnostics", Context.MODE_PRIVATE)
+        val notificationsGranted = if (android.os.Build.VERSION.SDK_INT >= 33) {
+            checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) ==
+                android.content.pm.PackageManager.PERMISSION_GRANTED
+        } else {
+            true
+        }
+
+        return JSONObject().apply {
+            val isDebuggable = (applicationInfo.flags and
+                android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
+            put("build_variant", if (isDebuggable) "debug" else "release")
+            put("checked_at_ms", System.currentTimeMillis())
+            put("mcp_service_alive", instance === this@McpService)
+            put("mcp_created_at_ms", diagnostics.getLong("mcp_created_at", 0L))
+            put("mcp_last_start_at_ms", diagnostics.getLong("mcp_last_start_at", 0L))
+            put("eyes_enabled", config.getBoolean("eyes_enabled", false))
+            put("eyes_timer_active", eyesTimer != null)
+            put(
+                "vision_api_configured",
+                !config.getString("vision_api_url", "").isNullOrBlank() &&
+                    !config.getString("vision_api_key", "").isNullOrBlank() &&
+                    !config.getString("vision_model", "").isNullOrBlank()
+            )
+            put("notification_permission_granted", notificationsGranted)
+            put("accessibility_connected", LCAccessibilityService.instance != null)
+            put("accessibility_connected_at_ms", diagnostics.getLong("accessibility_connected_at", 0L))
+            put("accessibility_last_event_at_ms", diagnostics.getLong("accessibility_last_event_at", 0L))
+            put("accessibility_last_event_package", diagnostics.getString("accessibility_last_event_package", ""))
+            put("accessibility_interrupted_at_ms", diagnostics.getLong("accessibility_interrupted_at", 0L))
+            put("accessibility_destroyed_at_ms", diagnostics.getLong("accessibility_destroyed_at", 0L))
+            put("accessibility_last_callback_error_at_ms", diagnostics.getLong("accessibility_last_callback_error_at", 0L))
+            put("accessibility_last_callback_error", diagnostics.getString("accessibility_last_callback_error", ""))
+            put("screenshot_last_requested_at_ms", diagnostics.getLong("screenshot_last_requested_at", 0L))
+            put("screenshot_last_success_at_ms", diagnostics.getLong("screenshot_last_success_at", 0L))
+            put("screenshot_last_failure_at_ms", diagnostics.getLong("screenshot_last_failure_at", 0L))
+            put("screenshot_last_failure", diagnostics.getString("screenshot_last_failure", ""))
+        }.toString(2)
+    }
+
     private fun toolLockApp(args: JSONObject): String {
         val packageName = args.optString("package_name").trim()
-        val duration = args.optInt("duration_minutes", 0)
-        val message = args.optString("lock_message", "").takeIf { it.isNotBlank() }
-        val showOverlay = args.optBoolean("show_overlay", true)
-        val result = AppLockManager.lock(this, packageName, duration, message, showOverlay)
-        return result.fold(
-            onSuccess = {
-                val durationText = if (duration > 0) " for $duration minutes" else " until manually released"
-                "App locked: $packageName$durationText. Overlay: $showOverlay. Active locks: ${it.size}"
-            },
-            onFailure = { "Lock refused: ${it.message}" }
-        )
+        return "App locking is not supported in this build (Vivo compat mode). " +
+            "应用锁暂不支持:为保证 Vivo 无障碍稳定,本版已停用应用锁拦截、锁定浮层与返回桌面。 " +
+            "lock_app 未写入任何配置;历史锁定记录可用 unlock_app 清除、list_locked_apps 查看。 " +
+            "Requested: $packageName (no state changed)."
     }
 
     private fun toolUnlockApp(args: JSONObject): String {
@@ -957,34 +1125,30 @@ class McpService : Service(), SensorEventListener {
         if (packageName.isEmpty()) return "Package name cannot be empty"
         val remaining = AppLockManager.unlock(this, packageName)
         LCAccessibilityService.instance?.dismissLockOverlay()
-        return "App unlocked: $packageName. Active locks: ${remaining.size}"
+        return "Removed $packageName from the locked list. Remaining: ${remaining.size}. " +
+            "注意:本版为 Vivo 兼容模式,应用锁不执行拦截,unlock 仅清理历史配置。"
     }
 
     private fun toolListLockedApps(): String {
         val locked = AppLockManager.getLockedApps(this).sorted()
-        if (locked.isEmpty()) return "No apps are currently locked"
-        return locked.joinToString(prefix = "Locked apps (${locked.size}):\n", separator = "\n") { pkg ->
+        if (locked.isEmpty()) return "No apps are currently locked (应用锁在 Vivo 兼容模式不执行拦截)"
+        return locked.joinToString(
+            prefix = "Locked apps (${locked.size}) — 本版 Vivo 兼容模式不执行拦截,仅为历史配置:\n",
+            separator = "\n"
+        ) { pkg ->
             val until = AppLockManager.getUnlockAt(this, pkg)
             if (until > 0L) "$pkg (until $until)" else "$pkg (manual unlock)"
         }
     }
 
     private fun toolFocusRikka(args: JSONObject): String {
-        val enabled = args.optBoolean("enabled", false)
-        val packages = jsonStringSet(args.optJSONArray("package_names"))
-        return AppLockManager.configureFocus(this, enabled, packages).fold(
-            onSuccess = { "Rikka focus ${if (enabled) "enabled" else "disabled"} for ${packages.size} package(s)" },
-            onFailure = { "Focus configuration refused: ${it.message}" }
-        )
+        return "Rikka focus is not supported in this build (Vivo compat mode). " +
+            "强制停留/跳转 RikkaHub 暂不支持:本版为保证 Vivo 无障碍稳定已停用该主动干预,配置未写入 (no state changed)."
     }
 
     private fun toolRedirectToRikka(args: JSONObject): String {
-        val packages = jsonStringSet(args.optJSONArray("package_names"))
-        val window = args.optString("time_window", "")
-        return AppLockManager.configureRedirect(this, packages, window).fold(
-            onSuccess = { "Rikka redirect configured for ${packages.size} package(s), window: $window" },
-            onFailure = { "Redirect configuration refused: ${it.message}" }
-        )
+        return "Rikka redirect is not supported in this build (Vivo compat mode). " +
+            "定时跳转 RikkaHub 暂不支持:本版为保证 Vivo 无障碍稳定已停用该主动干预,配置未写入 (no state changed)."
     }
 
     private fun jsonStringSet(array: JSONArray?): Set<String> {
@@ -1023,6 +1187,9 @@ class McpService : Service(), SensorEventListener {
 
             if (apiUrl.isEmpty() || apiKey.isEmpty() || model.isEmpty()) {
                 return "视觉API未配置，请在App中设置"
+            }
+            if (!VisionApiEndpointPolicy.isAllowed(apiUrl)) {
+                return "视觉API地址不安全：公共地址必须使用HTTPS；只有本机回环地址可使用HTTP"
             }
 
             val prompt = buildEyesPrompt()
@@ -1245,8 +1412,15 @@ ${if (personality.isNotEmpty()) "- $personality" else ""}
             put("precise_location_granted", status.preciseLocationGranted)
             put("background_location_granted", status.backgroundLocationGranted)
             put("configured_zones", JSONArray(status.configuredZoneIds.sorted()))
+            put("configured_zone_labels", JSONObject().apply {
+                status.configuredZoneLabels.toSortedMap().forEach { (id, label) -> put(id, label) }
+            })
             put("state", status.state.name.lowercase(Locale.ROOT))
             put("current_zone", status.currentZoneId ?: JSONObject.NULL)
+            put(
+                "current_zone_label",
+                status.currentZoneId?.let { status.configuredZoneLabels[it] } ?: JSONObject.NULL,
+            )
             put("pending_events", status.pendingEvents)
             put("reported_once_armed", status.reportedOnceArmed)
             put("current_trip_acknowledged", status.currentTripAcknowledged)
@@ -1261,8 +1435,23 @@ ${if (personality.isNotEmpty()) "- $personality" else ""}
                 put("automatic_recovery_count", status.diagnostics.recoveryCount)
             })
             put("coordinates_exposed", false)
+            put("zone_labels_are_user_configured_data", true)
+            put("instruction_authority", "none")
         }.toString()
     }
+
+    private fun toolGetDeviceContext(): String {
+        refreshStepDateForRead()
+        return DeviceContextSnapshot.build(this, stepCount, lastStepEventAt).toString(2)
+    }
+
+    private fun toolGetRecentContextEvents(args: JSONObject): String {
+        val limit = args.optInt("limit", 20).coerceIn(1, 50)
+        return DeviceContextSnapshot.recentEvents(this, limit).toString(2)
+    }
+
+    private fun toolGetContextCapabilities(): String =
+        DeviceContextSnapshot.capabilities(this).toString(2)
 
     private fun sendSentinelEvent(
         eventType: String,

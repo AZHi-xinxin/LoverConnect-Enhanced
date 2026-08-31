@@ -164,6 +164,38 @@ class GeofenceStateMachineTest {
     }
 
     @Test
+    fun `custom named zone keeps its id and label in departure and arrival events`() {
+        val customZone = SafetyZone("custom", "健身房", 0.0, 0.0, 500)
+        val customMachine = GeofenceStateMachine(
+            config.copy(zones = listOf(customZone))
+        )
+        var snapshot = GeofenceSnapshot()
+        listOf(1L, 61_000L, 121_000L).forEach { at ->
+            snapshot = customMachine.process(snapshot, sample(0.0, 0.0, at)).snapshot
+        }
+
+        val departureEvents = mutableListOf<LocationSafetyEvent>()
+        listOf(200_000L, 260_000L, 320_000L).forEach { at ->
+            val transition = customMachine.process(snapshot, sample(0.0, -0.01, at))
+            snapshot = transition.snapshot
+            departureEvents += transition.events
+        }
+        assertEquals(LocationSafetyEventType.DEPARTED, departureEvents.single().type)
+        assertEquals("custom", departureEvents.single().zoneId)
+        assertEquals("健身房", departureEvents.single().zoneLabel)
+
+        val arrivalEvents = mutableListOf<LocationSafetyEvent>()
+        listOf(400_000L, 460_000L, 520_000L).forEach { at ->
+            val transition = customMachine.process(snapshot, sample(0.0, 0.0, at))
+            snapshot = transition.snapshot
+            arrivalEvents += transition.events
+        }
+        assertEquals(LocationSafetyEventType.ARRIVED, arrivalEvents.single().type)
+        assertEquals("custom", arrivalEvents.single().zoneId)
+        assertEquals("健身房", arrivalEvents.single().zoneLabel)
+    }
+
+    @Test
     fun `out of order sample is rejected without changing state`() {
         val snapshot = calibratedInside()
         val transition = machine.process(snapshot, sample(0.0, -0.02, 120_000L))

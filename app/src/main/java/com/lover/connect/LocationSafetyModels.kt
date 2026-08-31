@@ -8,6 +8,68 @@ import kotlin.math.min
 import kotlin.math.sin
 import kotlin.math.sqrt
 
+object LocationSafetyRules {
+    const val HOME_ZONE_ID = "home"
+    const val WORK_ZONE_ID = "work"
+    const val CUSTOM_ZONE_ID = "custom"
+    const val MAX_ZONE_LABEL_LENGTH = 24
+
+    fun normalizeZoneLabel(input: CharSequence?): String = input?.toString().orEmpty()
+        .replace(Regex("[\\p{Cc}\\p{Cf}]"), "")
+        .replace(Regex("\\s+"), " ")
+        .trim()
+
+    fun isValidZoneLabel(input: CharSequence?): Boolean {
+        val normalized = normalizeZoneLabel(input)
+        return normalized.isNotEmpty() && normalized.length <= MAX_ZONE_LABEL_LENGTH
+    }
+
+    /**
+     * A zone edit is user configuration, not physical movement. Reconcile only
+     * the state that refers to the edited zone so new coordinates cannot
+     * manufacture a departure, while a real trip already in progress survives.
+     */
+    fun reconcileSnapshotAfterZoneChange(
+        snapshot: GeofenceSnapshot,
+        changedZoneId: String,
+        configuredZoneIds: Set<String>,
+    ): GeofenceSnapshot {
+        if (snapshot.currentZoneId == changedZoneId) return GeofenceSnapshot()
+
+        if (snapshot.originZoneId == changedZoneId) {
+            return snapshot.copy(
+                state = GeofenceState.AWAY,
+                currentZoneId = null,
+                candidateZoneId = null,
+                candidateSince = 0L,
+                candidateSamples = 0,
+                lastAcceptedSampleAt = 0L,
+                originZoneId = null,
+                // The former origin coordinates are gone. Never calculate a
+                // distance reminder against the replacement coordinates.
+                distanceReminderSent = true,
+            )
+        }
+
+        if (snapshot.candidateZoneId == changedZoneId) {
+            return if (snapshot.awaySessionId != null && snapshot.currentZoneId == null) {
+                snapshot.copy(
+                    state = GeofenceState.AWAY,
+                    candidateZoneId = null,
+                    candidateSince = 0L,
+                    candidateSamples = 0,
+                    lastAcceptedSampleAt = 0L,
+                    originZoneId = snapshot.originZoneId?.takeIf { it in configuredZoneIds },
+                )
+            } else {
+                GeofenceSnapshot()
+            }
+        }
+
+        return snapshot
+    }
+}
+
 enum class GeofenceState {
     UNKNOWN,
     INSIDE,
@@ -35,7 +97,9 @@ data class SafetyZone(
 ) {
     init {
         require(id.matches(Regex("[a-z0-9_-]{1,32}"))) { "Invalid zone id" }
-        require(label.isNotBlank() && label.length <= 24) { "Invalid zone label" }
+        require(label.isNotBlank() && label.length <= LocationSafetyRules.MAX_ZONE_LABEL_LENGTH) {
+            "Invalid zone label"
+        }
         require(latitude in -90.0..90.0) { "Invalid latitude" }
         require(longitude in -180.0..180.0) { "Invalid longitude" }
         require(radiusMeters in 200..2_000) { "radiusMeters must be 200..2000" }
