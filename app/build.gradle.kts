@@ -66,8 +66,8 @@ android {
         applicationId = "com.lover.connect"
         minSdk = 26
         targetSdk = 36
-        versionCode = 11
-        versionName = "2.4.0"
+        versionCode = 12
+        versionName = "2.4.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -118,6 +118,7 @@ dependencies {
     implementation(libs.androidx.ui.tooling.preview)
     implementation(libs.androidx.material3)
     testImplementation(libs.junit)
+    testImplementation("org.json:json:20240303")
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
     androidTestImplementation(platform(libs.androidx.compose.bom))

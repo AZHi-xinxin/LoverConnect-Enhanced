@@ -87,6 +87,7 @@ object LocationSafetyUploader {
             val conn = URL(endpoint).openConnection() as HttpURLConnection
             connection = conn
             conn.requestMethod = "POST"
+            conn.instanceFollowRedirects = false
             conn.connectTimeout = 8_000
             conn.readTimeout = 10_000
             conn.setRequestProperty("Content-Type", "application/json; charset=utf-8")
@@ -103,11 +104,12 @@ object LocationSafetyUploader {
                 put("reported_override", event.reportedOverride)
                 put("app_version", installedVersionName(context))
             }.toString().toByteArray(Charsets.UTF_8)
+            conn.setFixedLengthStreamingMode(payload.size)
             conn.outputStream.use { it.write(payload) }
             val code = conn.responseCode
             runCatching {
                 val stream = if (code >= 400) conn.errorStream else conn.inputStream
-                stream?.use { it.readBytes() }
+                drainResponse(stream)
             }
             code
         } catch (_: Exception) {
@@ -126,6 +128,19 @@ object LocationSafetyUploader {
         val token = prefs.getString("sentinel_token", "").orEmpty()
         if (endpoint == null || token.length < 16) return false
         return LocationSafetyEventStore(context).use { it.pendingCount() > 0 }
+    }
+
+    private fun drainResponse(stream: java.io.InputStream?) {
+        if (stream == null) return
+        stream.use { input ->
+            val buffer = ByteArray(4_096)
+            var remaining = MAX_RESPONSE_BYTES
+            while (remaining > 0) {
+                val count = input.read(buffer, 0, minOf(buffer.size, remaining))
+                if (count < 0) break
+                remaining -= count
+            }
+        }
     }
 
     @Suppress("DEPRECATION")
@@ -156,6 +171,7 @@ object LocationSafetyUploader {
     )
 
     private const val MAX_BATCH = 50
+    private const val MAX_RESPONSE_BYTES = 32 * 1_024
     private const val RETRY_REQUEST_CODE = 4204
     private const val ACTION_RETRY = "com.lover.connect.location.UPLOAD_RETRY"
 }

@@ -49,6 +49,7 @@ class McpService : Service(), SensorEventListener {
     private var lastStepEventAt: Long = 0L
     private var sensorManager: SensorManager? = null
     private var deviceContextCollector: DeviceContextCollector? = null
+    private var runtimeInitialized = false
 
     private var resetTimestamp: Long = 0L
 
@@ -67,18 +68,41 @@ class McpService : Service(), SensorEventListener {
         private const val MAX_HTTP_LINE_BYTES = 8_192
         private const val MAX_HTTP_HEADER_BYTES = 32_768
         private const val MAX_HTTP_HEADER_LINES = 64
+        @Volatile
         var instance: McpService? = null
 
         fun refreshDeviceContextCollection() {
             instance?.deviceContextCollector?.refresh()
+        }
+
+        fun refreshEyesTimer() {
+            instance?.startEyesTimer()
         }
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        val startTrigger = intent?.getStringExtra(McpServiceController.EXTRA_START_TRIGGER)
+            ?: "sticky_restart"
+        if (!McpServiceController.isEnabled(this)) {
+            getSharedPreferences("lc_diagnostics", Context.MODE_PRIVATE).edit()
+                .putBoolean("mcp_service_alive", false)
+                .putBoolean("mcp_server_listening", false)
+                .putLong("mcp_start_rejected_at", System.currentTimeMillis())
+                .putString("mcp_last_start_source", startTrigger)
+                .putString("mcp_restore_last_result", "rejected_disabled")
+                .apply()
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf(startId)
+            return START_NOT_STICKY
+        }
+        instance = this
+        if (!runtimeInitialized) initializeRuntime()
         getSharedPreferences("lc_diagnostics", Context.MODE_PRIVATE).edit()
+            .putBoolean("mcp_service_alive", true)
             .putLong("mcp_last_start_at", System.currentTimeMillis())
+            .putString("mcp_last_start_source", startTrigger)
             .apply()
         startEyesTimer()
         return START_STICKY
@@ -88,28 +112,30 @@ class McpService : Service(), SensorEventListener {
 
     override fun onCreate() {
         super.onCreate()
-        instance = this
         getSharedPreferences("lc_diagnostics", Context.MODE_PRIVATE).edit()
-            .putBoolean("mcp_service_alive", true)
+            .putBoolean("mcp_service_alive", false)
             .putLong("mcp_created_at", System.currentTimeMillis())
             .apply()
         createNotificationChannel()
         val notification = buildNotification()
         startForeground(NOTIFICATION_ID, notification)
+    }
 
+    private fun initializeRuntime() {
         restoreStepState()
         sensorManager = getSystemService(Context.SENSOR_SERVICE) as SensorManager
         val stepSensor = sensorManager?.getDefaultSensor(Sensor.TYPE_STEP_COUNTER)
         stepSensor?.let { sensorManager?.registerListener(this, it, SensorManager.SENSOR_DELAY_UI) }
         deviceContextCollector = DeviceContextCollector(this).also { it.start() }
-
         startServer()
+        runtimeInitialized = true
     }
 
     override fun onDestroy() {
         instance = null
         getSharedPreferences("lc_diagnostics", Context.MODE_PRIVATE).edit()
             .putBoolean("mcp_service_alive", false)
+            .putBoolean("mcp_server_listening", false)
             .putLong("mcp_destroyed_at", System.currentTimeMillis())
             .apply()
         isRunning = false
@@ -121,27 +147,15 @@ class McpService : Service(), SensorEventListener {
         deviceContextCollector?.stop()
         deviceContextCollector = null
         eyesTimer?.cancel()
+        eyesTimer = null
+        runtimeInitialized = false
         super.onDestroy()
-
-        // 被杀后5秒自动重启
-        val restartIntent = Intent(applicationContext, McpService::class.java)
-        val pendingIntent = PendingIntent.getService(
-            this, 0, restartIntent,
-            PendingIntent.FLAG_ONE_SHOT or PendingIntent.FLAG_IMMUTABLE
-        )
-        val alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
-        alarmManager.set(AlarmManager.RTC_WAKEUP, System.currentTimeMillis() + 5000, pendingIntent)
     }
 
-
     override fun onTaskRemoved(rootIntent: Intent?) {
-        val restartIntent = Intent(applicationContext, McpService::class.java)
-        val pendingIntent = PendingIntent.getService(
-            this, 1, restartIntent,
-            PendingIntent.FLAG_ONE_SHOT or PendingIntent.FLAG_IMMUTABLE
-        )
-        val alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
-        alarmManager.set(AlarmManager.RTC_WAKEUP, System.currentTimeMillis() + 3000, pendingIntent)
+        getSharedPreferences("lc_diagnostics", Context.MODE_PRIVATE).edit()
+            .putLong("mcp_task_removed_at", System.currentTimeMillis())
+            .apply()
         super.onTaskRemoved(rootIntent)
     }
 
@@ -204,6 +218,10 @@ class McpService : Service(), SensorEventListener {
                 // Context data is private. RikkaHub runs on the same phone, so
                 // the MCP endpoint must not be readable by other LAN devices.
                 serverSocket = ServerSocket(PORT, 50, InetAddress.getByName("127.0.0.1"))
+                getSharedPreferences("lc_diagnostics", Context.MODE_PRIVATE).edit()
+                    .putBoolean("mcp_server_listening", true)
+                    .remove("mcp_server_last_error")
+                    .apply()
                 while (isRunning) {
                     val client = serverSocket?.accept() ?: break
                     try {
@@ -212,7 +230,13 @@ class McpService : Service(), SensorEventListener {
                         runCatching { client.close() }
                     }
                 }
-            } catch (_: Exception) {}
+            } catch (error: Exception) {
+                getSharedPreferences("lc_diagnostics", Context.MODE_PRIVATE).edit()
+                    .putBoolean("mcp_server_listening", false)
+                    .putString("mcp_server_last_error", error.javaClass.simpleName)
+                    .putLong("mcp_server_last_error_at", System.currentTimeMillis())
+                    .apply()
+            }
         }.apply {
             name = "LoverConnect-MCP-Acceptor"
             start()
@@ -489,7 +513,7 @@ class McpService : Service(), SensorEventListener {
             })
             put(JSONObject().apply {
                 put("name", "lock_app")
-                put("description", "Lock an entertainment app. NOT SUPPORTED in Vivo compat mode: the call honestly reports 暂不支持 and writes nothing. Configure this tool to require manual approval in RikkaHub.")
+                put("description", "Lock an entertainment app on supported Android devices, including the OPPO active-compatibility path. Runtime-confirmed Vivo devices remain in passive compatibility mode, where this call reports 暂不支持 and writes nothing. Configure this tool to require manual approval in RikkaHub.")
                 put("inputSchema", JSONObject().apply {
                     put("type", "object")
                     put("properties", JSONObject().apply {
@@ -503,7 +527,7 @@ class McpService : Service(), SensorEventListener {
             })
             put(JSONObject().apply {
                 put("name", "unlock_app")
-                put("description", "Unlock one app by package name. In Vivo compat mode this only clears legacy locked-list entries (no interception is enforced).")
+                put("description", "Unlock one app by package name. On runtime-confirmed Vivo devices this only clears legacy locked-list entries because passive compatibility mode performs no interception.")
                 put("inputSchema", JSONObject().apply {
                     put("type", "object")
                     put("properties", JSONObject().apply { put("package_name", JSONObject().apply { put("type", "string") }) })
@@ -512,7 +536,7 @@ class McpService : Service(), SensorEventListener {
             })
             put(JSONObject().apply {
                 put("name", "focus_rikka")
-                put("description", "Redirect only explicitly listed entertainment apps to RikkaHub. NOT SUPPORTED in Vivo compat mode: the call honestly reports 暂不支持 and writes nothing. Requires manual approval.")
+                put("description", "Redirect only explicitly listed entertainment apps to RikkaHub on supported Android devices, including OPPO. Runtime-confirmed Vivo devices report 暂不支持 and write nothing. Requires manual approval.")
                 put("inputSchema", JSONObject().apply {
                     put("type", "object")
                     put("properties", JSONObject().apply {
@@ -524,7 +548,7 @@ class McpService : Service(), SensorEventListener {
             })
             put(JSONObject().apply {
                 put("name", "redirect_to_rikka")
-                put("description", "Redirect selected safe apps to RikkaHub during an HH:mm-HH:mm window. NOT SUPPORTED in Vivo compat mode: the call honestly reports 暂不支持 and writes nothing. Empty list disables it.")
+                put("description", "Redirect selected safe apps to RikkaHub during an HH:mm-HH:mm window on supported Android devices, including OPPO. Runtime-confirmed Vivo devices report 暂不支持 and write nothing. Empty list disables it.")
                 put("inputSchema", JSONObject().apply {
                     put("type", "object")
                     put("properties", JSONObject().apply {
@@ -536,7 +560,7 @@ class McpService : Service(), SensorEventListener {
             })
             put(JSONObject().apply {
                 put("name", "list_locked_apps")
-                put("description", "List apps currently locked by LoverConnect (in Vivo compat mode this is legacy config only — no interception is enforced)")
+                put("description", "List apps currently locked by LoverConnect. On runtime-confirmed Vivo devices entries are legacy configuration only because passive compatibility mode performs no interception.")
                 put("inputSchema", JSONObject().apply { put("type", "object"); put("properties", JSONObject()) })
             })
             put(JSONObject().apply {
@@ -1055,7 +1079,13 @@ class McpService : Service(), SensorEventListener {
             if (base64 != null) {
                 result = doEyesAnalysis(base64)
             } else {
-                result = "截屏失败：无障碍服务截屏返回空"
+                val failure = getSharedPreferences("lc_diagnostics", Context.MODE_PRIVATE)
+                    .getString("screenshot_last_failure", "capture_returned_empty")
+                result = if (failure == "media_projection_consent_required") {
+                    "截屏尚未授权：Android 10 及以下请打开 LoverConnect，点击「授权旧版 Android 屏幕捕获」并在系统弹窗中允许"
+                } else {
+                    "截屏失败：$failure"
+                }
             }
             latch.countDown()
         }
@@ -1085,9 +1115,16 @@ class McpService : Service(), SensorEventListener {
                 android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
             put("build_variant", if (isDebuggable) "debug" else "release")
             put("checked_at_ms", System.currentTimeMillis())
+            put("mcp_desired_enabled", McpServiceController.isEnabled(this@McpService))
             put("mcp_service_alive", instance === this@McpService)
+            put("mcp_server_listening", diagnostics.getBoolean("mcp_server_listening", false))
             put("mcp_created_at_ms", diagnostics.getLong("mcp_created_at", 0L))
             put("mcp_last_start_at_ms", diagnostics.getLong("mcp_last_start_at", 0L))
+            put("mcp_last_start_source", diagnostics.getString("mcp_last_start_source", ""))
+            put("mcp_restore_last_attempt_at_ms", diagnostics.getLong("mcp_restore_last_attempt_at", 0L))
+            put("mcp_restore_last_trigger", diagnostics.getString("mcp_restore_last_trigger", ""))
+            put("mcp_restore_last_result", diagnostics.getString("mcp_restore_last_result", ""))
+            put("mcp_server_last_error", diagnostics.getString("mcp_server_last_error", ""))
             put("eyes_enabled", config.getBoolean("eyes_enabled", false))
             put("eyes_timer_active", eyesTimer != null)
             put(
@@ -1097,6 +1134,14 @@ class McpService : Service(), SensorEventListener {
                     !config.getString("vision_model", "").isNullOrBlank()
             )
             put("notification_permission_granted", notificationsGranted)
+            val devicePolicy = DeviceCompatibility.currentPolicy()
+            val interventionMode = devicePolicy.appInterventionMode
+            put("accessibility_stability_mode", devicePolicy.accessibilityStabilityMode.name)
+            put("accessibility_intervention_mode", interventionMode.name)
+            put(
+                "active_app_interventions_supported",
+                interventionMode == DeviceCompatibility.AppInterventionMode.ACTIVE,
+            )
             put("accessibility_connected", LCAccessibilityService.instance != null)
             put("accessibility_connected_at_ms", diagnostics.getLong("accessibility_connected_at", 0L))
             put("accessibility_last_event_at_ms", diagnostics.getLong("accessibility_last_event_at", 0L))
@@ -1105,19 +1150,54 @@ class McpService : Service(), SensorEventListener {
             put("accessibility_destroyed_at_ms", diagnostics.getLong("accessibility_destroyed_at", 0L))
             put("accessibility_last_callback_error_at_ms", diagnostics.getLong("accessibility_last_callback_error_at", 0L))
             put("accessibility_last_callback_error", diagnostics.getString("accessibility_last_callback_error", ""))
+            val usesAccessibilityScreenshot = android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R
+            put("android_sdk_int", android.os.Build.VERSION.SDK_INT)
+            put(
+                "eyes_capture_mode",
+                if (usesAccessibilityScreenshot) "accessibility_screenshot" else "media_projection",
+            )
+            put("pixel_capture_supported", true)
+            put(
+                "pixel_capture_authorized",
+                usesAccessibilityScreenshot || ScreenCaptureService.isReady(),
+            )
+            put(
+                "eyes_effective_ready",
+                config.getBoolean("eyes_enabled", false) &&
+                    eyesTimer != null &&
+                    LCAccessibilityService.instance != null &&
+                    (usesAccessibilityScreenshot || ScreenCaptureService.isReady()),
+            )
             put("screenshot_last_requested_at_ms", diagnostics.getLong("screenshot_last_requested_at", 0L))
             put("screenshot_last_success_at_ms", diagnostics.getLong("screenshot_last_success_at", 0L))
             put("screenshot_last_failure_at_ms", diagnostics.getLong("screenshot_last_failure_at", 0L))
             put("screenshot_last_failure", diagnostics.getString("screenshot_last_failure", ""))
+            put("media_projection_ready", ScreenCaptureService.isReady())
+            put("media_projection_authorized_at_ms", diagnostics.getLong("media_projection_authorized_at", 0L))
+            put("media_projection_stopped_at_ms", diagnostics.getLong("media_projection_stopped_at", 0L))
+            put("media_projection_failure", diagnostics.getString("media_projection_failure", ""))
         }.toString(2)
     }
 
     private fun toolLockApp(args: JSONObject): String {
         val packageName = args.optString("package_name").trim()
-        return "App locking is not supported in this build (Vivo compat mode). " +
-            "应用锁暂不支持:为保证 Vivo 无障碍稳定,本版已停用应用锁拦截、锁定浮层与返回桌面。 " +
-            "lock_app 未写入任何配置;历史锁定记录可用 unlock_app 清除、list_locked_apps 查看。 " +
-            "Requested: $packageName (no state changed)."
+        if (!DeviceCompatibility.activeAppInterventionsSupported()) {
+            return "App locking is not supported on this Vivo device (passive compatibility mode). " +
+                "应用锁暂不支持:为保证 Vivo 无障碍稳定,当前设备已停用应用锁拦截、锁定浮层与返回桌面。 " +
+                "lock_app 未写入任何配置;历史锁定记录可用 unlock_app 清除、list_locked_apps 查看。 " +
+                "Requested: $packageName (no state changed)."
+        }
+        val duration = args.optInt("duration_minutes", 0)
+        val message = args.optString("lock_message", "").takeIf { it.isNotBlank() }
+        val showOverlay = args.optBoolean("show_overlay", true)
+        val result = AppLockManager.lock(this, packageName, duration, message, showOverlay)
+        return result.fold(
+            onSuccess = {
+                val durationText = if (duration > 0) " for $duration minutes" else " until manually released"
+                "App locked: $packageName$durationText. Overlay: $showOverlay. Active locks: ${it.size}"
+            },
+            onFailure = { "Lock refused: ${it.message}" },
+        )
     }
 
     private fun toolUnlockApp(args: JSONObject): String {
@@ -1125,16 +1205,28 @@ class McpService : Service(), SensorEventListener {
         if (packageName.isEmpty()) return "Package name cannot be empty"
         val remaining = AppLockManager.unlock(this, packageName)
         LCAccessibilityService.instance?.dismissLockOverlay()
-        return "Removed $packageName from the locked list. Remaining: ${remaining.size}. " +
-            "注意:本版为 Vivo 兼容模式,应用锁不执行拦截,unlock 仅清理历史配置。"
+        return if (DeviceCompatibility.activeAppInterventionsSupported()) {
+            "App unlocked: $packageName. Active locks: ${remaining.size}"
+        } else {
+            "Removed $packageName from the locked list. Remaining: ${remaining.size}. " +
+                "注意:当前 Vivo 设备使用被动兼容模式,应用锁不执行拦截,unlock 仅清理历史配置。"
+        }
     }
 
     private fun toolListLockedApps(): String {
         val locked = AppLockManager.getLockedApps(this).sorted()
-        if (locked.isEmpty()) return "No apps are currently locked (应用锁在 Vivo 兼容模式不执行拦截)"
+        val active = DeviceCompatibility.activeAppInterventionsSupported()
+        if (locked.isEmpty()) {
+            return if (active) "No apps are currently locked"
+            else "No apps are currently locked (当前 Vivo 设备的被动兼容模式不执行拦截)"
+        }
         return locked.joinToString(
-            prefix = "Locked apps (${locked.size}) — 本版 Vivo 兼容模式不执行拦截,仅为历史配置:\n",
-            separator = "\n"
+            prefix = if (active) {
+                "Locked apps (${locked.size}):\n"
+            } else {
+                "Locked apps (${locked.size}) — 当前 Vivo 设备的被动兼容模式不执行拦截,仅为历史配置:\n"
+            },
+            separator = "\n",
         ) { pkg ->
             val until = AppLockManager.getUnlockAt(this, pkg)
             if (until > 0L) "$pkg (until $until)" else "$pkg (manual unlock)"
@@ -1142,13 +1234,29 @@ class McpService : Service(), SensorEventListener {
     }
 
     private fun toolFocusRikka(args: JSONObject): String {
-        return "Rikka focus is not supported in this build (Vivo compat mode). " +
-            "强制停留/跳转 RikkaHub 暂不支持:本版为保证 Vivo 无障碍稳定已停用该主动干预,配置未写入 (no state changed)."
+        if (!DeviceCompatibility.activeAppInterventionsSupported()) {
+            return "Rikka focus is not supported on this Vivo device (passive compatibility mode). " +
+                "强制停留/跳转 RikkaHub 暂不支持:当前设备为保证 Vivo 无障碍稳定已停用该主动干预,配置未写入 (no state changed)."
+        }
+        val enabled = args.optBoolean("enabled", false)
+        val packages = jsonStringSet(args.optJSONArray("package_names"))
+        return AppLockManager.configureFocus(this, enabled, packages).fold(
+            onSuccess = { "Rikka focus ${if (enabled) "enabled" else "disabled"} for ${packages.size} package(s)" },
+            onFailure = { "Focus configuration refused: ${it.message}" },
+        )
     }
 
     private fun toolRedirectToRikka(args: JSONObject): String {
-        return "Rikka redirect is not supported in this build (Vivo compat mode). " +
-            "定时跳转 RikkaHub 暂不支持:本版为保证 Vivo 无障碍稳定已停用该主动干预,配置未写入 (no state changed)."
+        if (!DeviceCompatibility.activeAppInterventionsSupported()) {
+            return "Rikka redirect is not supported on this Vivo device (passive compatibility mode). " +
+                "定时跳转 RikkaHub 暂不支持:当前设备为保证 Vivo 无障碍稳定已停用该主动干预,配置未写入 (no state changed)."
+        }
+        val packages = jsonStringSet(args.optJSONArray("package_names"))
+        val window = args.optString("time_window", "")
+        return AppLockManager.configureRedirect(this, packages, window).fold(
+            onSuccess = { "Rikka redirect configured for ${packages.size} package(s), window: $window" },
+            onFailure = { "Redirect configuration refused: ${it.message}" },
+        )
     }
 
     private fun jsonStringSet(array: JSONArray?): Set<String> {
@@ -1160,9 +1268,10 @@ class McpService : Service(), SensorEventListener {
         val intervalMin = prefs.getInt("eyes_interval", 30)
         val enabled = prefs.getBoolean("eyes_enabled", false)
 
+        eyesTimer?.cancel()
+        eyesTimer = null
         if (!enabled) return
 
-        eyesTimer?.cancel()
         eyesTimer = Timer()
         eyesTimer?.scheduleAtFixedRate(object : TimerTask() {
             override fun run() {

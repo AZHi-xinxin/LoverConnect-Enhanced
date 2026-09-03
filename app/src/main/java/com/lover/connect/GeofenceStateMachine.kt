@@ -169,7 +169,33 @@ class GeofenceStateMachine(private val config: LocationSafetyConfig) {
         alreadyCounted: Boolean = false
     ): GeofenceTransition {
         val nearest = nearestWithin(sample) { it.enterRadiusMeters }
+        val directSwitchOrigin = snapshot.currentZoneId
+            ?.takeIf { snapshot.awaySessionId == null }
+
+        // A direct zone-to-zone candidate starts while the original zone is
+        // still authoritative. Returning to that original zone cancels the
+        // candidate silently; it must not create a synthetic "arrival home".
+        if (directSwitchOrigin != null && nearest?.first?.id == directSwitchOrigin) {
+            return GeofenceTransition(
+                clearCandidate(snapshot).copy(state = GeofenceState.INSIDE)
+            )
+        }
+
         if (nearest == null) {
+            // If a direct-switch candidate moves outside every zone, resume
+            // the ordinary departure confirmation from sample one. Jumping
+            // straight to AWAY would lose the origin and never emit a valid
+            // departure/session event.
+            if (directSwitchOrigin != null) {
+                return GeofenceTransition(
+                    snapshot.copy(
+                        state = GeofenceState.EXIT_PENDING,
+                        candidateZoneId = awayCandidate,
+                        candidateSince = sample.observedAt,
+                        candidateSamples = 1,
+                    )
+                )
+            }
             return GeofenceTransition(clearCandidate(snapshot).copy(state = GeofenceState.AWAY))
         }
 
@@ -180,7 +206,10 @@ class GeofenceStateMachine(private val config: LocationSafetyConfig) {
         )
         if (!isStable(advanced, sample.observedAt)) return GeofenceTransition(advanced)
 
-        val sessionId = advanced.awaySessionId ?: "arrival-${UUID.randomUUID()}"
+        // Direct zone-to-zone switches have no preceding AWAY session. The
+        // server contract still requires a bare UUID; the former "arrival-"
+        // prefix made these valid arrivals fail HTTP validation and disappear.
+        val sessionId = advanced.awaySessionId ?: UUID.randomUUID().toString()
         val event = LocationSafetyEvent(
             type = LocationSafetyEventType.ARRIVED,
             awaySessionId = sessionId,

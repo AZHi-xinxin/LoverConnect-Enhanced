@@ -31,8 +31,8 @@ internal class LocationCallbackWatchdog(
 }
 
 internal object LocationSamplingPolicy {
-    const val INTERVAL_MS = 90_000L
+    const val INTERVAL_MS = 30_000L
     const val MIN_DISTANCE_METERS = 0f
     const val WATCHDOG_CHECK_INTERVAL_MS = 30_000L
-    const val CALLBACK_STALE_AFTER_MS = 210_000L
+    const val CALLBACK_STALE_AFTER_MS = 120_000L
 }

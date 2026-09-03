@@ -119,7 +119,7 @@ object DeviceContextSnapshot {
                 put("raw_coordinates_returned", false)
             })
             put("delivery_channels", JSONObject().apply {
-                put("silent_context", "available to ST on the next model turn after adapter wiring")
+                put("silent_context", "available to an authorized AI client on its next model turn")
                 put("external_wake", "existing sentinel remains available for important events")
                 put("silent_context_is_not_a_wake", true)
             })

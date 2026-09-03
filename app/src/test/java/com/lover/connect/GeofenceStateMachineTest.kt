@@ -5,6 +5,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.UUID
 
 class GeofenceStateMachineTest {
     private val home = SafetyZone("home", "家", 0.0, 0.0, 500)
@@ -161,6 +162,75 @@ class GeofenceStateMachineTest {
         assertEquals(1, events.size)
         assertEquals(LocationSafetyEventType.ARRIVED, events.single().type)
         assertEquals("work", events.single().zoneId)
+        UUID.fromString(events.single().awaySessionId)
+
+        val duplicate = machine.process(snapshot, sample(0.0, 0.01, 380_000L))
+        assertTrue(duplicate.events.isEmpty())
+    }
+
+    @Test
+    fun `cancelled direct switch returns to original zone without false arrival`() {
+        var snapshot = calibratedInside()
+        val candidate = machine.process(snapshot, sample(0.0, 0.01, 200_000L))
+        snapshot = candidate.snapshot
+        assertEquals(GeofenceState.RETURN_PENDING, snapshot.state)
+
+        val returnedHome = machine.process(snapshot, sample(0.0, 0.0, 260_000L))
+        assertEquals(GeofenceState.INSIDE, returnedHome.snapshot.state)
+        assertEquals("home", returnedHome.snapshot.currentZoneId)
+        assertTrue(returnedHome.events.isEmpty())
+    }
+
+    @Test
+    fun `direct switch that leaves all zones restarts confirmed departure`() {
+        var snapshot = calibratedInside()
+        snapshot = machine.process(snapshot, sample(0.0, 0.01, 200_000L)).snapshot
+
+        val firstAway = machine.process(snapshot, sample(0.0, -0.02, 260_000L))
+        snapshot = firstAway.snapshot
+        assertEquals(GeofenceState.EXIT_PENDING, snapshot.state)
+        assertEquals("home", snapshot.currentZoneId)
+        assertTrue(firstAway.events.isEmpty())
+
+        val departures = mutableListOf<LocationSafetyEvent>()
+        listOf(320_000L, 380_000L).forEach { at ->
+            val transition = machine.process(snapshot, sample(0.0, -0.02, at))
+            snapshot = transition.snapshot
+            departures += transition.events
+        }
+        assertEquals(GeofenceState.AWAY, snapshot.state)
+        assertEquals(1, departures.size)
+        assertEquals(LocationSafetyEventType.DEPARTED, departures.single().type)
+        assertEquals("home", departures.single().zoneId)
+        UUID.fromString(departures.single().awaySessionId)
+    }
+
+    @Test
+    fun `home to school and custom direct switches produce server-valid one-shot arrivals`() {
+        val school = SafetyZone("school", "学校", 0.0, 0.01, 500)
+        val custom = SafetyZone("custom", "图书馆", 0.0, 0.02, 500)
+        val switchMachine = GeofenceStateMachine(
+            config.copy(zones = listOf(home, school, custom))
+        )
+        var snapshot = GeofenceSnapshot()
+        listOf(1L, 61_000L, 121_000L).forEach { at ->
+            snapshot = switchMachine.process(snapshot, sample(0.0, 0.0, at)).snapshot
+        }
+
+        fun switchTo(longitude: Double, times: List<Long>): LocationSafetyEvent {
+            val events = mutableListOf<LocationSafetyEvent>()
+            times.forEach { at ->
+                val transition = switchMachine.process(snapshot, sample(0.0, longitude, at))
+                snapshot = transition.snapshot
+                events += transition.events
+            }
+            assertEquals(1, events.size)
+            UUID.fromString(events.single().awaySessionId)
+            return events.single()
+        }
+
+        assertEquals("学校", switchTo(0.01, listOf(200_000L, 260_000L, 320_000L)).zoneLabel)
+        assertEquals("图书馆", switchTo(0.02, listOf(400_000L, 460_000L, 520_000L)).zoneLabel)
     }
 
     @Test
@@ -206,28 +276,33 @@ class GeofenceStateMachineTest {
     }
 
     @Test
-    fun `stationary samples can confirm production duration exit and return`() {
-        val productionMachine = GeofenceStateMachine(
-            config.copy(stableDurationMs = 180_000L, minimumSampleSpacingMs = 45_000L)
-        )
+    fun `default policy confirms three 30 second samples and survives service recreation`() {
+        val productionMachine = GeofenceStateMachine(LocationSafetyConfig(zones = listOf(home, work)))
         var snapshot = GeofenceSnapshot()
-        listOf(1L, 90_001L, 180_001L).forEach { at ->
+        listOf(1L, 30_001L, 60_001L).forEach { at ->
             snapshot = productionMachine.process(snapshot, sample(0.0, 0.0, at)).snapshot
         }
         assertEquals(GeofenceState.INSIDE, snapshot.state)
 
         val departureEvents = mutableListOf<LocationSafetyEvent>()
-        listOf(270_001L, 360_001L, 450_001L).forEach { at ->
+        listOf(90_001L, 120_001L).forEach { at ->
             val transition = productionMachine.process(snapshot, sample(0.0, -0.01, at))
             snapshot = transition.snapshot
             departureEvents += transition.events
         }
+        assertEquals(GeofenceState.EXIT_PENDING, snapshot.state)
+        // Recreating the pure machine models Android service restart while the
+        // persisted coarse snapshot carries the candidate forward.
+        val recreated = GeofenceStateMachine(LocationSafetyConfig(zones = listOf(home, work)))
+        val finalDeparture = recreated.process(snapshot, sample(0.0, -0.01, 150_001L))
+        snapshot = finalDeparture.snapshot
+        departureEvents += finalDeparture.events
         assertEquals(GeofenceState.AWAY, snapshot.state)
         assertEquals(listOf(LocationSafetyEventType.DEPARTED), departureEvents.map { it.type })
 
         val arrivalEvents = mutableListOf<LocationSafetyEvent>()
-        listOf(540_001L, 630_001L, 720_001L).forEach { at ->
-            val transition = productionMachine.process(snapshot, sample(0.0, 0.0, at))
+        listOf(180_001L, 210_001L, 240_001L).forEach { at ->
+            val transition = recreated.process(snapshot, sample(0.0, 0.0, at))
             snapshot = transition.snapshot
             arrivalEvents += transition.events
         }

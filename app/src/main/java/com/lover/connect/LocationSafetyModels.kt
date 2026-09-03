@@ -112,9 +112,9 @@ data class SafetyZone(
 data class LocationSafetyConfig(
     val zones: List<SafetyZone> = emptyList(),
     val secondReminderMeters: Int = 5_000,
-    val stableDurationMs: Long = 180_000L,
+    val stableDurationMs: Long = DEFAULT_STABLE_DURATION_MS,
     val validAccuracyMeters: Float = 100f,
-    val minimumSampleSpacingMs: Long = 45_000L,
+    val minimumSampleSpacingMs: Long = DEFAULT_SAMPLE_SPACING_MS,
     val secondReminderDelayMs: Long = 900_000L
 ) {
     init {
@@ -125,6 +125,14 @@ data class LocationSafetyConfig(
         require(validAccuracyMeters in 20f..200f) { "Invalid accuracy threshold" }
         require(minimumSampleSpacingMs in 1_000L..180_000L) { "Invalid sample spacing" }
         require(secondReminderDelayMs >= 900_000L) { "Second reminder delay must be at least 15 minutes" }
+    }
+
+    companion object {
+        // A movement is first observed, then confirmed by two more accepted
+        // samples 30 seconds apart. With scheduling jitter this delivers in
+        // roughly 60-90 seconds instead of the former three-plus minutes.
+        const val DEFAULT_STABLE_DURATION_MS = 60_000L
+        const val DEFAULT_SAMPLE_SPACING_MS = 30_000L
     }
 }
 

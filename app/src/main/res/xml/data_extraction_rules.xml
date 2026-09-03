@@ -7,6 +7,7 @@
     <cloud-backup>
         <exclude domain="sharedpref" path="lc_config.xml" />
         <exclude domain="sharedpref" path="lc_diagnostics.xml" />
+        <exclude domain="sharedpref" path="lc_service_control.xml" />
         <exclude domain="file" path="lc_memory.json" />
         <exclude domain="file" path="lc_eyes_log.txt" />
         <exclude domain="sharedpref" path="lc_location_secure.xml" />
@@ -19,6 +20,7 @@
     <device-transfer>
         <exclude domain="sharedpref" path="lc_config.xml" />
         <exclude domain="sharedpref" path="lc_diagnostics.xml" />
+        <exclude domain="sharedpref" path="lc_service_control.xml" />
         <exclude domain="file" path="lc_memory.json" />
         <exclude domain="file" path="lc_eyes_log.txt" />
         <exclude domain="sharedpref" path="lc_location_secure.xml" />

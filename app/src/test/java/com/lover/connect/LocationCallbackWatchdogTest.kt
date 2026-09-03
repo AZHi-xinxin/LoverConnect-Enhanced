@@ -9,7 +9,8 @@ class LocationCallbackWatchdogTest {
     @Test
     fun `subscription policy does not require movement`() {
         assertEquals(0f, LocationSamplingPolicy.MIN_DISTANCE_METERS)
-        assertEquals(90_000L, LocationSamplingPolicy.INTERVAL_MS)
+        assertEquals(30_000L, LocationSamplingPolicy.INTERVAL_MS)
+        assertEquals(120_000L, LocationSamplingPolicy.CALLBACK_STALE_AFTER_MS)
     }
 
     @Test

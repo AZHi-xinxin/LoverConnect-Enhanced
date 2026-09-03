@@ -67,6 +67,12 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onStart() {
+        super.onStart()
+        McpServiceController.initializeForInteractiveLaunch(this)
+        McpServiceController.startIfEnabled(this, "activity_started")
+    }
+
     private fun requestActivityRecognitionIfNeeded() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.ACTIVITY_RECOGNITION) !=
@@ -84,7 +90,6 @@ fun MainScreen() {
     val prefs = context.getSharedPreferences("lc_config", Context.MODE_PRIVATE)
     val scrollState = rememberScrollState()
 
-    var serviceRunning by remember { mutableStateOf(false) }
     var city by remember { mutableStateOf(prefs.getString("city", "") ?: "") }
     var newAnnName by remember { mutableStateOf("") }
     var newAnnDate by remember { mutableStateOf("") }
@@ -98,6 +103,7 @@ fun MainScreen() {
     var eyesPersonality by remember { mutableStateOf(prefs.getString("eyes_personality", "") ?: "") }
     var eyesInterval by remember { mutableStateOf(prefs.getInt("eyes_interval", 30).toString()) }
     var eyesEnabled by remember { mutableStateOf(prefs.getBoolean("eyes_enabled", false)) }
+    var screenCaptureMessage by remember { mutableStateOf("") }
 
     // 视觉API配置
     var visionApiUrl by remember { mutableStateOf(prefs.getString("vision_api_url", "") ?: "") }
@@ -106,8 +112,24 @@ fun MainScreen() {
     var visionConfigMessage by remember { mutableStateOf("") }
 
     // 截屏授权
+    val screenCaptureLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        val resultData = result.data
+        if (result.resultCode == Activity.RESULT_OK && resultData != null) {
+            try {
+                ScreenCaptureService.start(context, result.resultCode, resultData)
+                screenCaptureMessage = "屏幕捕获已授权；授权仅在本次服务会话内有效"
+            } catch (error: Exception) {
+                screenCaptureMessage = "屏幕捕获服务启动失败：${error.javaClass.simpleName}"
+            }
+        } else {
+            screenCaptureMessage = "未授权屏幕捕获，小L不会读取屏幕像素"
+        }
+    }
 
     var memoryMessage by remember { mutableStateOf("") }
+    var mcpEnabled by remember { mutableStateOf(McpServiceController.isEnabled(context)) }
     val localMcpEndpoint = remember { McpLocalSecurity.endpoint(context) }
 
     val exportLauncher = rememberLauncherForActivityResult(
@@ -171,24 +193,24 @@ fun MainScreen() {
 
         Row(verticalAlignment = Alignment.CenterVertically) {
             Button(onClick = {
-                val intent = Intent(context, McpService::class.java)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    context.startForegroundService(intent)
-                } else {
-                    context.startService(intent)
-                }
-                serviceRunning = true
-            }) {
+                mcpEnabled = true
+                McpServiceController.enableAndStart(context)
+            }, enabled = !mcpEnabled) {
                 Text("启动服务")
             }
             Spacer(modifier = Modifier.width(12.dp))
             Button(onClick = {
-                context.stopService(Intent(context, McpService::class.java))
-                serviceRunning = false
-            }) {
+                mcpEnabled = false
+                McpServiceController.disableAndStop(context)
+            }, enabled = mcpEnabled) {
                 Text("停止服务")
             }
         }
+        Text(
+            text = if (mcpEnabled) "运行意图：已启用（开机或更新后会恢复）" else "运行意图：已停止",
+            fontSize = 12.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
 
         Card(modifier = Modifier.fillMaxWidth()) {
             Column(modifier = Modifier.padding(12.dp)) {
@@ -318,6 +340,11 @@ fun MainScreen() {
                 onCheckedChange = {
                     eyesEnabled = it
                     prefs.edit().putBoolean("eyes_enabled", it).apply()
+                    McpService.refreshEyesTimer()
+                    if (!it && Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+                        ScreenCaptureService.stop(context)
+                        screenCaptureMessage = "小L已关闭，屏幕捕获会话已停止"
+                    }
                 }
             )
         }
@@ -371,11 +398,33 @@ fun MainScreen() {
                 .putString("eyes_personality", eyesPersonality.trim())
                 .putInt("eyes_interval", eyesInterval.toIntOrNull() ?: 30)
                 .apply()
+            McpService.refreshEyesTimer()
         }) {
             Text("保存小L配置")
         }
 
 // 截屏授权
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            Text(
+                "Android 10 及以下需要额外的系统屏幕捕获授权；系统会持续显示通知，停止服务或重启后需重新授权。",
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            OutlinedButton(onClick = {
+                val manager = context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                screenCaptureLauncher.launch(manager.createScreenCaptureIntent())
+            }, modifier = Modifier.fillMaxWidth()) {
+                Text("授权旧版 Android 屏幕捕获")
+            }
+            if (screenCaptureMessage.isNotBlank()) {
+                Text(
+                    screenCaptureMessage,
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+
         OutlinedButton(onClick = {
             val intent = Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)
             context.startActivity(intent)

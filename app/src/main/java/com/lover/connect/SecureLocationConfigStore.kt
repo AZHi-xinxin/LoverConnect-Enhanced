@@ -92,7 +92,7 @@ class SecureLocationConfigStore(context: Context) {
     }
 
     private fun encodeConfig(config: LocationSafetyConfig): String = JSONObject().apply {
-        put("version", 1)
+        put("version", 2)
         put("second_reminder_meters", config.secondReminderMeters)
         put("stable_duration_ms", config.stableDurationMs)
         put("valid_accuracy_meters", config.validAccuracyMeters.toDouble())
@@ -113,7 +113,7 @@ class SecureLocationConfigStore(context: Context) {
 
     private fun decodeConfig(raw: String): LocationSafetyConfig {
         val json = JSONObject(raw)
-        require(json.optInt("version", 0) == 1) { "Unsupported location config version" }
+        require(json.optInt("version", 0) in 1..2) { "Unsupported location config version" }
         val zoneArray = json.optJSONArray("zones") ?: JSONArray()
         val zones = (0 until zoneArray.length()).map { index ->
             val zone = zoneArray.getJSONObject(index)
@@ -128,9 +128,12 @@ class SecureLocationConfigStore(context: Context) {
         return LocationSafetyConfig(
             zones = zones,
             secondReminderMeters = json.optInt("second_reminder_meters", 5_000),
-            stableDurationMs = json.optLong("stable_duration_ms", 180_000L),
+            // v1 persisted the former 180s/45s production policy. Confirmation
+            // timing is operational policy rather than user-authored location
+            // data, so both v1 and v2 use the current fixed safe defaults.
+            stableDurationMs = LocationSafetyConfig.DEFAULT_STABLE_DURATION_MS,
             validAccuracyMeters = json.optDouble("valid_accuracy_meters", 100.0).toFloat(),
-            minimumSampleSpacingMs = json.optLong("minimum_sample_spacing_ms", 45_000L),
+            minimumSampleSpacingMs = LocationSafetyConfig.DEFAULT_SAMPLE_SPACING_MS,
             secondReminderDelayMs = json.optLong("second_reminder_delay_ms", 900_000L)
         )
     }

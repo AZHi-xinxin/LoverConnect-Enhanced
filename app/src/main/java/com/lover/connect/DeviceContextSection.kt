@@ -2,7 +2,6 @@ package com.lover.connect
 
 import android.content.Context
 import android.content.Intent
-import androidx.core.content.ContextCompat
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -45,9 +44,7 @@ fun DeviceContextSection() {
         enabled = value
         prefs.edit().putBoolean(DeviceContextSettings.KEY_ENABLED, value).apply()
         if (!value) DeviceContextStore(context).clearEphemeral()
-        if (value && McpService.instance == null) {
-            ContextCompat.startForegroundService(context, Intent(context, McpService::class.java))
-        }
+        if (value) McpServiceController.enableAndStart(context, "device_context_enabled")
         McpService.refreshDeviceContextCollection()
         status = when {
             !value -> "设备情境已停止采集"
@@ -102,7 +99,7 @@ fun DeviceContextSection() {
         Text(status, fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
     }
     Text(
-        "传递方式：普通状态可在下一次对话时静默交给 ST；重要事件仍可用哨兵主动唤醒。静默注入本身不会主动发起对话。",
+        "传递方式：普通状态可在下一次对话时交给已接入的 AI 客户端；重要事件仍可用哨兵主动唤醒。静默上下文本身不会主动发起对话。",
         fontSize = 12.sp,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )

@@ -17,6 +17,14 @@ object McpLocalSecurity {
         return isAuthorizedRequestLine(requestLine, getOrCreateToken(context))
     }
 
+    fun hasStoredEndpointToken(context: Context): Boolean {
+        val token = context.applicationContext
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getString(TOKEN_KEY, null)
+        return token != null && token.length == TOKEN_HEX_LENGTH &&
+            token.all { it in "0123456789abcdef" }
+    }
+
     internal fun isAuthorizedRequestLine(requestLine: String, expectedToken: String): Boolean {
         val parts = requestLine.trim().split(Regex("\\s+"))
         if (parts.size != 3 || parts[0] != "POST") return false

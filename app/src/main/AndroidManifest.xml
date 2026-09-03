@@ -4,6 +4,7 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
@@ -49,11 +50,19 @@
             android:name=".McpService"
             android:enabled="true"
             android:exported="false"
-            android:foregroundServiceType="specialUse">
+            android:foregroundServiceType="specialUse"
+            android:stopWithTask="false">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Runs the user-enabled local-only MCP endpoint and short-lived device-context sensors for the on-device AI client." />
         </service>
+
+        <service
+            android:name=".ScreenCaptureService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection"
+            android:stopWithTask="false" />
 
         <service
             android:name=".LocationTrackingService"
@@ -98,6 +107,7 @@
             android:exported="false">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
 
