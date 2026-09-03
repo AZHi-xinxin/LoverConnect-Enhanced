@@ -1,15 +1,15 @@
-LoverConnect Enhanced 2.4.0 public release
+LoverConnect Enhanced 2.4.1 public release
 
 Package: com.lover.connect
-Version code: 11
-Version name: 2.4.0
+Version code: 12
+Version name: 2.4.1
 Build type: release (non-debuggable)
 APK signature scheme v2: verified
 Signer certificate SHA-256:
 b2fd4dc1083d5e267c83c908f18bb5d76e9ba746edc8b21fbc07086b865d8cd1
 
 This is the existing LoverConnect Enhanced public release certificate.
-It can update older APKs signed by the same public certificate without clearing app data.
+It can update any older APK signed by the same public certificate without clearing app data.
 The phone-specific private test/update package uses a different certificate and must never be published.
 
 No keystore, password, private token, device configuration, or private endpoint is included in this folder.

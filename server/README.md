@@ -45,9 +45,9 @@ and request throttling returns 429.
 
 ## Reminder behavior
 
-1. A confirmed exit opens an away session. If the phone did not attach an
-   explicit one-shot report marker, the first reminder becomes due after the
-   configured grace period.
+1. A confirmed exit opens an away session. The phone has already completed
+   three consecutive checks, so if it did not attach an explicit one-shot
+   report marker, the first reminder is due immediately.
 2. The phone's “already reported” action sends `reported_override` or a
    `report_acknowledged` event. Either cancels pending report reminders without
    exposing chat text.
@@ -71,7 +71,8 @@ python3 -m unittest -v test_loverconnect_ingress.py
 ```
 
 The suite covers schema privacy, strict validation, phone-side report markers,
-retries, idempotency, arrival/offline/ack flows, rate
+retries, idempotency, recovery from a crash between event insertion and job
+derivation, arrival/offline/ack flows, rate
 limits, concurrent schedulers, the HTTP boundary, and the legacy endpoint.
 
 ## Run
@@ -96,4 +97,29 @@ curl -fsS http://127.0.0.1:8790/health
 For upgrades, first run this implementation on a loopback-only staging port
 with a separate database. Switch the existing 8790 service only after tests and
 legacy endpoint regression pass. Keep the old receiver and its state backup
-until the Android 2.3 end-to-end test has completed.
+until the Android 2.4.1 end-to-end test has completed.
+
+### 2.4.1 upgrade checklist
+
+The Android app now performs the three-sample confirmation itself. This server
+revision therefore schedules a confirmed departure immediately instead of
+adding the former 45-second grace period. The SQLite schema and HTTP paths are
+unchanged.
+
+1. Back up the currently deployed Python source and SQLite database without
+   changing the live service.
+2. Run `python3 -m unittest -v test_loverconnect_ingress.py` against this source,
+   then start it on a loopback-only staging port with a separate temporary
+   database and placeholder/test credentials.
+3. Replace only `loverconnect_ingress.py` in the authorized deployment path;
+   keep the existing protected environment file, bearer token and production
+   database path unchanged.
+4. Restart the authorized ingress service and verify `/health`, the legacy
+   `/loverconnect/alert` path, a valid direct `zone_enter_confirmed` event, and
+   replay of that same `event_id` returning `status=duplicate` without a second
+   notification.
+5. Keep the source and database backup until a real Android 2.4.1
+   home-to-work/custom-fence transition has produced exactly one notice.
+
+Do not deploy merely by copying the public example environment file: it contains
+placeholders and must never replace the protected production configuration.

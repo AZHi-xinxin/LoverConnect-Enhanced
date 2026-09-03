@@ -76,10 +76,10 @@ JOB_OFFLINE_SUMMARY = "offline_summary_notice"
 JOB_CORRECTION_NOTICE = "correction_notice"
 NOTICE_JOBS = {JOB_ARRIVAL_NOTICE, JOB_OFFLINE_SUMMARY, JOB_CORRECTION_NOTICE}
 
-# The scheduler wakes every 15 seconds. A 45-second grace keeps the initial
-# departure notice within one minute of the phone's confirmed third sample,
-# while preserving a brief window for the explicit "already reported" button.
-INITIAL_NOTICE_DELAY_MS = 45_000
+# The phone has already completed three consecutive location confirmations
+# before submitting this event. Dispatch immediately; the persisted scheduler
+# still provides crash recovery and retry without adding another grace delay.
+INITIAL_NOTICE_DELAY_MS = 0
 
 
 class ValidationError(ValueError):
@@ -329,6 +329,33 @@ class SQLiteStore:
                 return True
             except sqlite3.IntegrityError:
                 return False
+
+    def event(self, event_id: str) -> Optional[LocationEvent]:
+        """Return the canonical persisted payload for idempotent recovery.
+
+        Event insertion and its derived session/job updates intentionally use
+        small SQLite transactions.  If the process stops between those steps,
+        a retry must replay the stored payload instead of treating the primary
+        key collision as proof that all derived work already completed.
+        """
+
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM location_events WHERE event_id=?",
+                (event_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return LocationEvent(
+            event_id=row["event_id"],
+            event_type=row["event_type"],
+            away_session_id=row["away_session_id"],
+            zone_id=row["zone_id"],
+            zone_label=row["zone_label"],
+            occurred_at_ms=int(row["occurred_at_ms"]),
+            distance_bucket=row["distance_bucket"],
+            reported_override=bool(row["reported_override"]),
+        )
 
     def set_event_status(self, event_id: str, status: str) -> None:
         with self._lock, self._connect() as conn:
@@ -639,8 +666,18 @@ class LocationEventService:
             event = validate_location_event(body, now_ms)
         except ValidationError as exc:
             return 400, {"error": str(exc)}
-        if not self.store.insert_event(event, now_ms):
-            return 200, {"status": "duplicate", "event_id": event.event_id}
+        inserted = self.store.insert_event(event, now_ms)
+        if not inserted:
+            # A duplicate can be a normal retry after the HTTP response was
+            # lost, but it can also be recovery from a crash immediately after
+            # insert_event().  Re-run the idempotent derivation below from the
+            # canonical stored payload so a session/job can never be stranded.
+            persisted = self.store.event(event.event_id)
+            if persisted is None:
+                # Defensive only: insert_event() can currently fail solely on
+                # the event_id primary key, so the row should always exist.
+                raise RuntimeError("duplicate location event row disappeared")
+            event = persisted
 
         if event.event_type == "zone_exit_confirmed":
             self.store.ensure_departure(event, now_ms)
@@ -679,7 +716,11 @@ class LocationEventService:
             self.store.set_event_status(event.event_id, "diagnostic_only")
 
         self.run_due_jobs_once(limit=10)
-        return 202, {"status": "accepted", "event_id": event.event_id}
+        return (
+            (202, {"status": "accepted", "event_id": event.event_id})
+            if inserted
+            else (200, {"status": "duplicate", "event_id": event.event_id})
+        )
 
     def run_due_jobs_once(self, limit: int = 20) -> int:
         with self._run_lock:
