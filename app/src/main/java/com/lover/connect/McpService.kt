@@ -64,6 +64,7 @@ class McpService : Service(), SensorEventListener {
         private const val STEP_COUNT = "count"
         private const val STEP_LAST_SENSOR_TOTAL = "last_sensor_total"
         private const val STEP_LAST_EVENT_AT = "last_event_at"
+        private val EYES_LOG_LOCK = Any()
         private const val MAX_REQUEST_BODY_BYTES = 1_048_576
         private const val MAX_HTTP_LINE_BYTES = 8_192
         private const val MAX_HTTP_HEADER_BYTES = 32_768
@@ -1090,7 +1091,9 @@ class McpService : Service(), SensorEventListener {
             latch.countDown()
         }
 
-        latch.await(30, java.util.concurrent.TimeUnit.SECONDS)
+        if (!latch.await(30, java.util.concurrent.TimeUnit.SECONDS)) {
+            return "截图或分析仍在进行，尚未确认日记写入；请稍后读取日记与 get_l_service_status，不要立即重复截屏"
+        }
         return result
     }
 
@@ -1114,6 +1117,11 @@ class McpService : Service(), SensorEventListener {
             val isDebuggable = (applicationInfo.flags and
                 android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0
             put("build_variant", if (isDebuggable) "debug" else "release")
+            put("app_version", BuildConfig.VERSION_NAME)
+            put("app_version_code", BuildConfig.VERSION_CODE)
+            put("eyes_analysis_last", try {
+                JSONObject(diagnostics.getString("eyes_analysis_last", "{}") ?: "{}")
+            } catch (_: Exception) { JSONObject() })
             put("checked_at_ms", System.currentTimeMillis())
             put("mcp_desired_enabled", McpServiceController.isEnabled(this@McpService))
             put("mcp_service_alive", instance === this@McpService)
@@ -1288,6 +1296,9 @@ class McpService : Service(), SensorEventListener {
     }
 
     private fun doEyesAnalysis(base64: String): String {
+        val startedAtMs = System.currentTimeMillis()
+        var metadata = JSONObject()
+        var diaryWritten = false
         return try {
             val prefs = getSharedPreferences("lc_config", Context.MODE_PRIVATE)
             val apiUrl = prefs.getString("vision_api_url", "") ?: ""
@@ -1295,25 +1306,56 @@ class McpService : Service(), SensorEventListener {
             val model = prefs.getString("vision_model", "") ?: ""
 
             if (apiUrl.isEmpty() || apiKey.isEmpty() || model.isEmpty()) {
+                saveEyesAnalysisDiagnostic(startedAtMs, "vision_not_configured", metadata)
                 return "视觉API未配置，请在App中设置"
             }
             if (!VisionApiEndpointPolicy.isAllowed(apiUrl)) {
+                saveEyesAnalysisDiagnostic(startedAtMs, "unsafe_endpoint", metadata)
                 return "视觉API地址不安全：公共地址必须使用HTTPS；只有本机回环地址可使用HTTP"
             }
 
             val prompt = buildEyesPrompt()
-            val responseText = callVisionApi(apiUrl, apiKey, model, prompt, base64)
-            val analysis = EyesResponseParser.parse(responseText)
-                ?: return "分析完成：未返回有效日记内容"
-            writeEyesLog(analysis.message)
+            val response = callVisionApi(apiUrl, apiKey, model, prompt, base64)
+            metadata = response.metadata
+            val parsed = EyesResponseParser.parseDetailed(response.content)
+            val rejection = response.rejectionCode ?: parsed.rejectionCode
+            if (rejection != null) {
+                saveEyesAnalysisDiagnostic(startedAtMs, rejection, metadata)
+                return "本次未写入日记：$rejection；详情见 get_l_service_status 的 eyes_analysis_last（不含截图或正文）"
+            }
+            val analysis = parsed.analysis ?: error("Missing parsed analysis")
+            if (!writeEyesLog(analysis.message)) {
+                saveEyesAnalysisDiagnostic(startedAtMs, "diary_write_failed", metadata)
+                return "分析已完成，但日记写入失败；详情见 get_l_service_status"
+            }
+            diaryWritten = true
+            saveEyesAnalysisDiagnostic(startedAtMs, "written", metadata)
             handleEyesAction(analysis.action, analysis.message)
             "分析完成：${analysis.message}"
         } catch (e: Exception) {
-            "分析失败：${e.message}"
+            val code = if (diaryWritten) "written_alert_failed" else when (e) {
+                is java.net.SocketTimeoutException -> "request_timeout"
+                is java.io.IOException -> "request_failed"
+                else -> "analysis_failed"
+            }
+            saveEyesAnalysisDiagnostic(startedAtMs, code, metadata)
+            if (diaryWritten) return "日记已写入，但后续提醒处理失败；请读取最新日记，不要重复截屏"
+            "本次分析失败：$code；详情见 get_l_service_status（不含截图或正文）"
         }
     }
 
-    private fun callVisionApi(apiUrl: String, apiKey: String, model: String, prompt: String, imageBase64: String): String {
+    private fun saveEyesAnalysisDiagnostic(startedAtMs: Long, result: String, metadata: JSONObject) {
+        val safeSnapshot = JSONObject(metadata.toString()).apply {
+            put("started_at_ms", startedAtMs)
+            put("completed_at_ms", System.currentTimeMillis())
+            put("result", result)
+            put("diary_written", result == "written" || result == "written_alert_failed")
+        }
+        getSharedPreferences("lc_diagnostics", Context.MODE_PRIVATE).edit()
+            .putString("eyes_analysis_last", safeSnapshot.toString()).apply()
+    }
+
+    private fun callVisionApi(apiUrl: String, apiKey: String, model: String, prompt: String, imageBase64: String): EyesVisionResult {
         val url = URL(apiUrl)
         val conn = url.openConnection() as HttpURLConnection
         conn.requestMethod = "POST"
@@ -1345,17 +1387,13 @@ class McpService : Service(), SensorEventListener {
             put("max_tokens", 1000)
         }
 
-        conn.outputStream.write(requestBody.toString().toByteArray())
-        conn.outputStream.flush()
-
-        val response = BufferedReader(InputStreamReader(conn.inputStream)).readText()
-        conn.disconnect()
-
-        val json = JSONObject(response)
-        return json.getJSONArray("choices")
-            .getJSONObject(0)
-            .getJSONObject("message")
-            .getString("content")
+        return try {
+            conn.outputStream.use { it.write(requestBody.toString().toByteArray(Charsets.UTF_8)) }
+            val response = BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8)).use { it.readText() }
+            EyesVisionResponse.decode(response)
+        } finally {
+            conn.disconnect()
+        }
     }
     private fun getTodayScreenMinutes(): Long {
         return try {
@@ -1463,19 +1501,35 @@ ${if (personality.isNotEmpty()) "- $personality" else ""}
 只回复JSON，不要多余文字。"""
     }
 
-    private fun writeEyesLog(content: String) {
-        val message = EyesDiaryText.nonBlank(content) ?: return
+    private fun writeEyesLog(content: String): Boolean = synchronized(EYES_LOG_LOCK) {
+        val message = EyesDiaryText.nonBlank(content) ?: return@synchronized false
         try {
             val file = java.io.File(filesDir, "lc_eyes_log.txt")
+            // Recover an interrupted retention write before appending (including old Android).
+            if (file.exists() || java.io.File(file.path + ".bak").exists()) {
+                android.util.AtomicFile(file).openRead().use { }
+            }
             val timeStr = SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date())
             file.appendText("[$timeStr] $message\n")
 
             // 保留最近200条，防止文件过大
-            val lines = file.readLines()
-            if (lines.size > 200) {
-                file.writeText(lines.takeLast(200).joinToString("\n") + "\n")
-            }
-        } catch (_: Exception) {}
+            try {
+                val lines = file.readLines()
+                if (lines.size > 200) {
+                    val retained = lines.takeLast(200).joinToString("\n") + "\n"
+                    val atomicFile = android.util.AtomicFile(file)
+                    val output = atomicFile.startWrite()
+                    try {
+                        output.write(retained.toByteArray(Charsets.UTF_8))
+                        atomicFile.finishWrite(output)
+                    } catch (e: Exception) {
+                        atomicFile.failWrite(output)
+                        throw e
+                    }
+                }
+            } catch (_: Exception) { /* Append already succeeded; retention is best effort. */ }
+            true
+        } catch (_: Exception) { false }
     }
 
     private fun toolConfigureSentinel(args: JSONObject): String {
@@ -1628,12 +1682,15 @@ ${if (personality.isNotEmpty()) "- $personality" else ""}
         }
     }
 
-    private fun readRecentEyesLog(lines: Int): String {
+    private fun readRecentEyesLog(lines: Int): String = synchronized(EYES_LOG_LOCK) {
         val file = java.io.File(filesDir, "lc_eyes_log.txt")
-        if (!file.exists()) return "暂无日记"
-        val allLines = file.readLines()
-        if (allLines.isEmpty()) return "暂无日记"
-        return allLines.takeLast(lines).joinToString("\n")
+        val allLines = try {
+            android.util.AtomicFile(file).openRead().bufferedReader(Charsets.UTF_8).use { it.readLines() }
+        } catch (_: java.io.FileNotFoundException) {
+            return@synchronized "暂无日记"
+        }
+        if (allLines.isEmpty()) return@synchronized "暂无日记"
+        allLines.takeLast(lines.coerceIn(1, 200)).joinToString("\n")
     }
 // ==================== 辅助方法 ====================
 
