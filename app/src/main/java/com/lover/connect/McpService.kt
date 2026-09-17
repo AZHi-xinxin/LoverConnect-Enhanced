@@ -1303,24 +1303,11 @@ class McpService : Service(), SensorEventListener {
 
             val prompt = buildEyesPrompt()
             val responseText = callVisionApi(apiUrl, apiKey, model, prompt, base64)
-// 解析JSON响应
-            try {
-                val actionJson = JSONObject(responseText)
-                val action = actionJson.optString("action", "log")
-                val message = actionJson.optString("message", "")
-
-                // 写日记
-                writeEyesLog(message)
-
-                // 执行操作
-                handleEyesAction(action, message)
-
-                "分析完成：$message"
-            } catch (_: Exception) {
-                // 如果返回不是JSON，直接当日记写
-                writeEyesLog(responseText)
-                "分析完成：$responseText"
-            }
+            val analysis = EyesResponseParser.parse(responseText)
+                ?: return "分析完成：未返回有效日记内容"
+            writeEyesLog(analysis.message)
+            handleEyesAction(analysis.action, analysis.message)
+            "分析完成：${analysis.message}"
         } catch (e: Exception) {
             "分析失败：${e.message}"
         }
@@ -1477,10 +1464,11 @@ ${if (personality.isNotEmpty()) "- $personality" else ""}
     }
 
     private fun writeEyesLog(content: String) {
+        val message = EyesDiaryText.nonBlank(content) ?: return
         try {
             val file = java.io.File(filesDir, "lc_eyes_log.txt")
             val timeStr = SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date())
-            file.appendText("[$timeStr] $content\n")
+            file.appendText("[$timeStr] $message\n")
 
             // 保留最近200条，防止文件过大
             val lines = file.readLines()

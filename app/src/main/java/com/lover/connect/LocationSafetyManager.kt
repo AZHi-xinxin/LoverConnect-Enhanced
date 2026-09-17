@@ -14,6 +14,7 @@ data class LocationSafetyStatus(
     val backgroundLocationGranted: Boolean,
     val configuredZoneIds: Set<String>,
     val configuredZoneLabels: Map<String, String>,
+    val configuredZoneRadiiMeters: Map<String, Int>,
     val state: GeofenceState,
     val currentZoneId: String?,
     val pendingEvents: Int,
@@ -73,7 +74,11 @@ object LocationSafetyManager {
     }
 
     /** Reloads settings; an edited zone is silently re-baselined, not treated as movement. */
-    fun refreshConfiguration(context: Context, changedZoneId: String? = null) {
+    fun refreshConfiguration(
+        context: Context,
+        changedZoneId: String? = null,
+        zoneCenterChanged: Boolean = true,
+    ) {
         val app = context.applicationContext
         val runtime = LocationSafetyRuntimeStore(app)
         val config = runCatching { SecureLocationConfigStore(app).load() }.getOrNull()
@@ -83,6 +88,7 @@ object LocationSafetyManager {
                     snapshot = runtime.loadSnapshot(),
                     changedZoneId = changedZoneId,
                     configuredZoneIds = config?.zones?.map { it.id }?.toSet().orEmpty(),
+                    centerChanged = zoneCenterChanged,
                 )
             )
         }
@@ -95,6 +101,8 @@ object LocationSafetyManager {
             app,
             Intent(app, LocationTrackingService::class.java)
                 .setAction(LocationTrackingService.ACTION_START)
+                .putExtra(LocationTrackingService.EXTRA_CHANGED_ZONE_ID, changedZoneId)
+                .putExtra(LocationTrackingService.EXTRA_ZONE_CENTER_CHANGED, zoneCenterChanged)
         )
     }
 
@@ -165,6 +173,7 @@ object LocationSafetyManager {
             configuredZoneLabels = zones.associate { zone ->
                 zone.id to LocationSafetyRules.normalizeZoneLabel(zone.label)
             },
+            configuredZoneRadiiMeters = zones.associate { it.id to it.radiusMeters },
             state = snapshot.state,
             currentZoneId = snapshot.currentZoneId,
             pendingEvents = pending,

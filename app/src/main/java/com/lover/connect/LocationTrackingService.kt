@@ -61,12 +61,18 @@ class LocationTrackingService : Service(), LocationListener {
         when (intent?.action) {
             ACTION_PAUSE -> pauseTracking()
             ACTION_STOP -> stopTracking()
-            ACTION_START, null -> startTrackingIfAllowed()
+            ACTION_START, null -> startTrackingIfAllowed(
+                changedZoneId = intent?.getStringExtra(EXTRA_CHANGED_ZONE_ID),
+                zoneCenterChanged = intent?.getBooleanExtra(EXTRA_ZONE_CENTER_CHANGED, true) ?: true,
+            )
         }
         return START_STICKY
     }
 
-    private fun startTrackingIfAllowed() {
+    private fun startTrackingIfAllowed(
+        changedZoneId: String? = null,
+        zoneCenterChanged: Boolean = true,
+    ) {
         if (!runtimeStore.isTrackingEnabled() || runtimeStore.isPaused()) {
             stopSelf()
             return
@@ -95,7 +101,17 @@ class LocationTrackingService : Service(), LocationListener {
         zoneLabels = config.zones.associate { zone ->
             zone.id to LocationSafetyRules.normalizeZoneLabel(zone.label)
         }
-        snapshot = runtimeStore.loadSnapshot()
+        // A callback already queued before ACTION_START may have overwritten
+        // the manager's persisted reset using the old in-memory snapshot.
+        // Reconcile again here, on the same main looper as location callbacks,
+        // while switching both the machine and snapshot to the new config.
+        snapshot = LocationSafetyRules.reconcileSnapshotAfterZoneChange(
+            snapshot = runtimeStore.loadSnapshot(),
+            changedZoneId = changedZoneId,
+            configuredZoneIds = config.zones.map { it.id }.toSet(),
+            centerChanged = zoneCenterChanged,
+        )
+        if (changedZoneId != null) runtimeStore.saveSnapshot(snapshot)
         startLocationForeground(buildNotification("正在等待安全定位"))
         requestLocationUpdates(recovery = false)
         scheduleCallbackWatchdog()
@@ -155,6 +171,9 @@ class LocationTrackingService : Service(), LocationListener {
     }
 
     override fun onLocationChanged(location: Location) {
+        // removeUpdates cannot retract a callback already in the main queue.
+        // Inactive edits rely on the persisted reset until the next start.
+        if (!runtimeStore.isTrackingEnabled() || runtimeStore.isPaused()) return
         val observedAt = System.currentTimeMillis()
         callbackWatchdog.onRawCallback(SystemClock.elapsedRealtime())
         runtimeStore.recordRawCallback(observedAt)
@@ -354,6 +373,8 @@ class LocationTrackingService : Service(), LocationListener {
         const val ACTION_START = "com.lover.connect.location.START"
         const val ACTION_PAUSE = "com.lover.connect.location.PAUSE"
         const val ACTION_STOP = "com.lover.connect.location.STOP"
+        const val EXTRA_CHANGED_ZONE_ID = "changed_zone_id"
+        const val EXTRA_ZONE_CENTER_CHANGED = "zone_center_changed"
         private const val CHANNEL_ID = "lc_location_safety"
         private const val NOTIFICATION_ID = 4203
         private const val MAX_LOCATION_AGE_NANOS = 300_000_000_000L

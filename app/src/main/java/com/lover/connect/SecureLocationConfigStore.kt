@@ -62,6 +62,12 @@ class SecureLocationConfigStore(context: Context) {
         return updated
     }
 
+    fun saveZoneRadius(zoneId: String, radiusMeters: Int): LocationSafetyConfig {
+        val updated = load().withZoneRadius(zoneId, radiusMeters)
+        save(updated)
+        return updated
+    }
+
     fun saveSecondReminderMeters(meters: Int): LocationSafetyConfig {
         val updated = load().copy(secondReminderMeters = meters)
         save(updated)

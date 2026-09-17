@@ -102,6 +102,33 @@ fun LocationSafetySection() {
         }
     }
 
+    fun saveZoneRadius(id: String, label: String) {
+        val radius = radiusText.toIntOrNull()
+        if (radius == null || radius !in 200..2_000) {
+            message = "围栏半径需为 200–2000 米。"
+            return
+        }
+        runCatching {
+            SecureLocationConfigStore(context).saveZoneRadius(id, radius)
+        }.onSuccess {
+            val reloaded = runCatching {
+                LocationSafetyManager.refreshConfiguration(
+                    context,
+                    changedZoneId = id,
+                    zoneCenterChanged = false,
+                )
+            }.isSuccess
+            message = if (reloaded) {
+                "$label 半径已保存为 $radius 米；中心位置不变。"
+            } else {
+                "$label 半径已保存为 $radius 米；请重新开启安全播报以应用设置。"
+            }
+        }.onFailure {
+            message = "半径未保存，请确认围栏仍存在且加密配置可读后重试。"
+        }
+        refresh()
+    }
+
     fun captureZone(id: String, label: String) {
         val normalizedLabel = LocationSafetyRules.normalizeZoneLabel(label)
         if (!LocationSafetyRules.isValidZoneLabel(normalizedLabel)) {
@@ -210,6 +237,22 @@ fun LocationSafetySection() {
         modifier = Modifier.fillMaxWidth(),
         singleLine = true
     )
+    if (status.configuredZoneIds.isNotEmpty()) {
+        Text(
+            "修改半径后，选择要保存的围栏；中心位置保持不变，无需重新定位。",
+            fontSize = 12.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        status.configuredZoneLabels.forEach { (id, label) ->
+            OutlinedButton(
+                onClick = { saveZoneRadius(id, label) },
+                enabled = locatingZone == null,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("保存“$label”半径（当前 ${status.configuredZoneRadiiMeters[id]} 米）")
+            }
+        }
+    }
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         Button(
             onClick = { captureZone(LocationSafetyRules.HOME_ZONE_ID, "家") },

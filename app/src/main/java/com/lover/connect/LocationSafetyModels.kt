@@ -31,12 +31,14 @@ object LocationSafetyRules {
      */
     fun reconcileSnapshotAfterZoneChange(
         snapshot: GeofenceSnapshot,
-        changedZoneId: String,
+        changedZoneId: String?,
         configuredZoneIds: Set<String>,
+        centerChanged: Boolean = true,
     ): GeofenceSnapshot {
+        if (changedZoneId == null) return snapshot
         if (snapshot.currentZoneId == changedZoneId) return GeofenceSnapshot()
 
-        if (snapshot.originZoneId == changedZoneId) {
+        if (centerChanged && snapshot.originZoneId == changedZoneId) {
             return snapshot.copy(
                 state = GeofenceState.AWAY,
                 currentZoneId = null,
@@ -125,6 +127,15 @@ data class LocationSafetyConfig(
         require(validAccuracyMeters in 20f..200f) { "Invalid accuracy threshold" }
         require(minimumSampleSpacingMs in 1_000L..180_000L) { "Invalid sample spacing" }
         require(secondReminderDelayMs >= 900_000L) { "Second reminder delay must be at least 15 minutes" }
+    }
+
+    /** Edits an existing fence without recapturing its center or changing other settings. */
+    fun withZoneRadius(zoneId: String, radiusMeters: Int): LocationSafetyConfig {
+        require(radiusMeters in 200..2_000) { "radiusMeters must be 200..2000" }
+        require(zones.any { it.id == zoneId }) { "Set the safety zone before editing its radius" }
+        return copy(zones = zones.map { zone ->
+            if (zone.id == zoneId) zone.copy(radiusMeters = radiusMeters) else zone
+        })
     }
 
     companion object {
